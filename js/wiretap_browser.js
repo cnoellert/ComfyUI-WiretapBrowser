@@ -2,18 +2,22 @@
  * ComfyUI Wiretap Browser - Frontend Extension
  *
  * Provides a visual tree browser widget for navigating Autodesk Flame's
- * Wiretap IFFFS hierarchy. When the user clicks "Browse" on the
- * WiretapBrowser node, a modal dialog opens showing the project tree:
+ * Wiretap IFFFS hierarchy. Supports two modes:
  *
- *   Server → Projects → Libraries → Reels → Clips
+ *   SOURCE mode (WiretapBrowser node):
+ *     Browse and select clips to load frames from.
+ *     Server → Projects → Libraries → Reels → [select Clip]
  *
- * Selecting a clip populates the node's clip_node_id widget.
+ *   DESTINATION mode (WiretapFrameWriter node):
+ *     Browse and select a library or reel to write frames into.
+ *     Server → Projects → Libraries → [select Reel or Library]
  */
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-// Icon SVGs for different node types in the tree
+// ─── Icon SVGs ───────────────────────────────────────────────────────────────
+
 const ICONS = {
     server: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1"/><circle cx="6" cy="18" r="1"/></svg>`,
     database: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>`,
@@ -26,15 +30,48 @@ const ICONS = {
     image: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`,
     maximize: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`,
     minimize: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>`,
+    upload: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>`,
+    download: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="8 17 12 21 16 17"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/></svg>`,
     file: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`,
     loading: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>`,
 };
 
-function getIcon(iconName) {
-    return ICONS[iconName] || ICONS.file;
+function getIcon(name) {
+    return ICONS[name] || ICONS.file;
 }
 
-// Styles for the browser modal
+// ─── Mode Configuration ──────────────────────────────────────────────────────
+
+const BROWSER_MODES = {
+    source: {
+        title: "Select Source Clip",
+        icon: "download",
+        accentColor: "#ff6b35",
+        accentHover: "#e55a2b",
+        accentBg: "#3d1e00",
+        selectBtnLabel: "Select Clip",
+        emptyHint: "Navigate to a clip to load",
+        isSelectable: (child) => child.is_clip,
+        showClipInfo: true,
+    },
+    destination: {
+        title: "Select Write Destination",
+        icon: "upload",
+        accentColor: "#2ecc71",
+        accentHover: "#27ae60",
+        accentBg: "#0d3d1f",
+        selectBtnLabel: "Select Destination",
+        emptyHint: "Navigate to a library or reel to write into",
+        isSelectable: (child) => {
+            const t = child.node_type;
+            return t === "LIBRARY" || t === "REEL" || t === "REEL_GROUP";
+        },
+        showClipInfo: false,
+    },
+};
+
+// ─── Styles ──────────────────────────────────────────────────────────────────
+
 const MODAL_STYLES = `
 .wiretap-overlay {
     position: fixed; top: 0; left: 0; right: 0; bottom: 0;
@@ -43,7 +80,7 @@ const MODAL_STYLES = `
 }
 .wiretap-modal {
     background: #1a1a2e; border: 1px solid #444; border-radius: 8px;
-    width: 600px; max-height: 80vh; display: flex; flex-direction: column;
+    width: 620px; max-height: 80vh; display: flex; flex-direction: column;
     box-shadow: 0 8px 32px rgba(0,0,0,0.5); color: #e0e0e0;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     font-size: 13px;
@@ -53,7 +90,7 @@ const MODAL_STYLES = `
     display: flex; align-items: center; justify-content: space-between;
 }
 .wiretap-header h3 {
-    margin: 0; font-size: 15px; color: #ff6b35;
+    margin: 0; font-size: 15px;
     display: flex; align-items: center; gap: 8px;
 }
 .wiretap-header .close-btn {
@@ -61,12 +98,16 @@ const MODAL_STYLES = `
     font-size: 20px; padding: 4px 8px; border-radius: 4px;
 }
 .wiretap-header .close-btn:hover { background: #333; color: #fff; }
+.wiretap-mode-badge {
+    font-size: 10px; font-weight: 600; padding: 2px 8px;
+    border-radius: 3px; text-transform: uppercase; letter-spacing: 0.5px;
+}
 .wiretap-breadcrumb {
     padding: 8px 16px; background: #16213e; border-bottom: 1px solid #333;
     display: flex; flex-wrap: wrap; gap: 4px; align-items: center;
     font-size: 12px;
 }
-.wiretap-breadcrumb span { color: #666; }
+.wiretap-breadcrumb span.sep { color: #666; }
 .wiretap-breadcrumb a {
     color: #5dade2; text-decoration: none; cursor: pointer;
 }
@@ -82,45 +123,47 @@ const MODAL_STYLES = `
 .wiretap-node:hover { background: #16213e; }
 .wiretap-node.selected { background: #1a3a5c; }
 .wiretap-node .icon { flex-shrink: 0; color: #5dade2; display: flex; }
-.wiretap-node .icon.clip-icon { color: #ff6b35; }
 .wiretap-node .name { flex: 1; }
 .wiretap-node .type-badge {
     font-size: 10px; padding: 1px 6px; border-radius: 3px;
     background: #333; color: #888;
 }
-.wiretap-node .type-badge.clip { background: #3d1e00; color: #ff6b35; }
-.wiretap-clip-info {
-    padding: 8px 16px; background: #0f3460; border-top: 1px solid #333;
+.wiretap-node .select-hint {
+    font-size: 10px; padding: 1px 6px; border-radius: 3px;
+    opacity: 0; transition: opacity 0.15s;
+}
+.wiretap-node:hover .select-hint { opacity: 1; }
+.wiretap-info-panel {
+    padding: 8px 16px; border-top: 1px solid #333;
     font-size: 12px; color: #aaa;
+}
+.wiretap-info-panel.clip-info {
     display: flex; flex-wrap: wrap; gap: 16px;
 }
-.wiretap-clip-info .info-item {
-    display: flex; gap: 4px;
+.wiretap-info-panel .info-item { display: flex; gap: 4px; }
+.wiretap-info-panel .info-label { color: #5dade2; }
+.wiretap-info-panel .dest-path {
+    font-family: monospace; font-size: 11px; color: #2ecc71;
+    word-break: break-all; margin-top: 4px;
 }
-.wiretap-clip-info .info-label { color: #5dade2; }
 .wiretap-footer {
     padding: 12px 16px; border-top: 1px solid #333;
-    display: flex; justify-content: flex-end; gap: 8px;
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
 }
+.wiretap-footer .footer-left { font-size: 11px; color: #666; }
+.wiretap-footer .footer-right { display: flex; gap: 8px; }
 .wiretap-footer button {
     padding: 6px 16px; border-radius: 4px; border: 1px solid #444;
     cursor: pointer; font-size: 13px;
 }
 .wiretap-footer .btn-cancel { background: #333; color: #ccc; }
 .wiretap-footer .btn-cancel:hover { background: #444; }
-.wiretap-footer .btn-select {
-    background: #ff6b35; color: #fff; border-color: #ff6b35;
-}
-.wiretap-footer .btn-select:hover { background: #e55a2b; }
 .wiretap-footer .btn-select:disabled {
-    background: #555; border-color: #555; color: #888; cursor: default;
+    background: #555 !important; border-color: #555 !important;
+    color: #888 !important; cursor: default !important;
 }
-.wiretap-empty {
-    padding: 32px; text-align: center; color: #666;
-}
-.wiretap-loading {
-    padding: 32px; text-align: center; color: #5dade2;
-}
+.wiretap-empty { padding: 32px; text-align: center; color: #666; }
+.wiretap-loading { padding: 32px; text-align: center; color: #5dade2; }
 .wiretap-error {
     padding: 16px; margin: 8px 16px; background: #3d1414;
     border: 1px solid #622; border-radius: 4px; color: #e88;
@@ -131,20 +174,30 @@ const MODAL_STYLES = `
 }
 `;
 
+// ─── Browser Dialog ──────────────────────────────────────────────────────────
+
 class WiretapBrowserDialog {
-    constructor(hostname, serverType, onSelect) {
+    /**
+     * @param {string}   hostname    Flame workstation hostname
+     * @param {string}   serverType  "IFFFS" or "Gateway"
+     * @param {string}   mode        "source" or "destination"
+     * @param {function} onSelect    callback(selectedNode)
+     */
+    constructor(hostname, serverType, mode, onSelect) {
         this.hostname = hostname;
         this.serverType = serverType;
+        this.mode = mode;
+        this.config = BROWSER_MODES[mode] || BROWSER_MODES.source;
         this.onSelect = onSelect;
         this.currentPath = "/";
         this.pathHistory = [{ path: "/", name: "Root" }];
         this.selectedNode = null;
         this.isMockMode = false;
         this.overlay = null;
+        this._keyHandler = null;
     }
 
     async open() {
-        // Inject styles
         if (!document.getElementById("wiretap-styles")) {
             const style = document.createElement("style");
             style.id = "wiretap-styles";
@@ -152,7 +205,6 @@ class WiretapBrowserDialog {
             document.head.appendChild(style);
         }
 
-        // Check SDK status
         try {
             const res = await api.fetchApi("/wiretap/status");
             const status = await res.json();
@@ -167,6 +219,10 @@ class WiretapBrowserDialog {
     }
 
     close() {
+        if (this._keyHandler) {
+            document.removeEventListener("keydown", this._keyHandler);
+            this._keyHandler = null;
+        }
         if (this.overlay) {
             this.overlay.remove();
             this.overlay = null;
@@ -174,6 +230,10 @@ class WiretapBrowserDialog {
     }
 
     _buildModal() {
+        const cfg = this.config;
+        const modeLabel = this.mode === "destination" ? "WRITE TO" : "READ FROM";
+        const modeIcon = getIcon(cfg.icon);
+
         this.overlay = document.createElement("div");
         this.overlay.className = "wiretap-overlay";
         this.overlay.addEventListener("click", (e) => {
@@ -182,26 +242,35 @@ class WiretapBrowserDialog {
 
         const modal = document.createElement("div");
         modal.className = "wiretap-modal";
-
-        // Header
         modal.innerHTML = `
             <div class="wiretap-header">
-                <h3>
-                    ${getIcon("film")}
-                    Wiretap Browser — ${this.hostname}
+                <h3 style="color: ${cfg.accentColor}">
+                    ${modeIcon}
+                    ${cfg.title} — ${this.hostname}
+                    <span class="wiretap-mode-badge"
+                        style="background: ${cfg.accentBg}; color: ${cfg.accentColor};">
+                        ${modeLabel}
+                    </span>
                 </h3>
                 <button class="close-btn">&times;</button>
             </div>
-            ${this.isMockMode ? '<div class="wiretap-mock-banner">⚠ Mock Mode — Wiretap SDK not detected. Showing sample data.</div>' : ''}
+            ${this.isMockMode
+                ? '<div class="wiretap-mock-banner">⚠ Mock Mode — Wiretap SDK not detected. Showing sample data.</div>'
+                : ''}
             <div class="wiretap-breadcrumb" id="wt-breadcrumb"></div>
             <div class="wiretap-tree" id="wt-tree"></div>
-            <div class="wiretap-clip-info" id="wt-clip-info" style="display:none"></div>
+            <div class="wiretap-info-panel" id="wt-info" style="display:none"></div>
             <div class="wiretap-footer">
-                <button class="btn-cancel" id="wt-cancel">Cancel</button>
-                <button class="btn-select" id="wt-select" disabled>Select Clip</button>
+                <div class="footer-left" id="wt-footer-hint">${cfg.emptyHint}</div>
+                <div class="footer-right">
+                    <button class="btn-cancel" id="wt-cancel">Cancel</button>
+                    <button class="btn-select" id="wt-select" disabled
+                        style="background: ${cfg.accentColor}; color: #fff; border-color: ${cfg.accentColor};">
+                        ${cfg.selectBtnLabel}
+                    </button>
+                </div>
             </div>
         `;
-
         this.overlay.appendChild(modal);
 
         modal.querySelector(".close-btn").onclick = () => this.close();
@@ -212,27 +281,41 @@ class WiretapBrowserDialog {
                 this.close();
             }
         };
+
+        this._keyHandler = (e) => { if (e.key === "Escape") this.close(); };
+        document.addEventListener("keydown", this._keyHandler);
     }
 
     _updateBreadcrumb() {
-        const container = this.overlay.querySelector("#wt-breadcrumb");
-        container.innerHTML = "";
-
+        const bc = this.overlay.querySelector("#wt-breadcrumb");
+        bc.innerHTML = "";
         this.pathHistory.forEach((item, idx) => {
             if (idx > 0) {
                 const sep = document.createElement("span");
+                sep.className = "sep";
                 sep.textContent = " › ";
-                container.appendChild(sep);
+                bc.appendChild(sep);
             }
             const link = document.createElement("a");
             link.textContent = item.name;
             link.onclick = () => {
                 this.pathHistory = this.pathHistory.slice(0, idx + 1);
                 this.currentPath = item.path;
+                this._clearSelection();
                 this._loadChildren(item.path);
             };
-            container.appendChild(link);
+            bc.appendChild(link);
         });
+    }
+
+    _clearSelection() {
+        this.selectedNode = null;
+        const btn = this.overlay.querySelector("#wt-select");
+        if (btn) btn.disabled = true;
+        const info = this.overlay.querySelector("#wt-info");
+        if (info) info.style.display = "none";
+        const hint = this.overlay.querySelector("#wt-footer-hint");
+        if (hint) hint.textContent = this.config.emptyHint;
     }
 
     async _loadChildren(nodeId) {
@@ -253,58 +336,69 @@ class WiretapBrowserDialog {
                 tree.innerHTML = `<div class="wiretap-error">Error: ${data.error}</div>`;
                 return;
             }
-
             if (data.children.length === 0) {
                 tree.innerHTML = `<div class="wiretap-empty">No items found</div>`;
                 return;
             }
 
             tree.innerHTML = "";
+            const cfg = this.config;
+
             data.children.forEach((child) => {
                 const row = document.createElement("div");
                 row.className = "wiretap-node";
 
-                const isClip = child.is_clip;
-                const iconClass = isClip ? "icon clip-icon" : "icon";
-                const typeBadgeClass = isClip ? "type-badge clip" : "type-badge";
+                const selectable = cfg.isSelectable(child);
+                const canBrowse = child.has_children !== false;
+                const iconColor = selectable ? cfg.accentColor : "#5dade2";
+
+                const badgeStyle = selectable
+                    ? `background:${cfg.accentBg}; color:${cfg.accentColor}`
+                    : "";
+
+                let hintHtml = "";
+                if (selectable) {
+                    const verb = this.mode === "destination" ? "write here" : "select";
+                    hintHtml = `<span class="select-hint"
+                        style="background:${cfg.accentBg}; color:${cfg.accentColor};">
+                        click to ${verb}</span>`;
+                }
 
                 row.innerHTML = `
-                    <span class="${iconClass}">${getIcon(child.icon)}</span>
+                    <span class="icon" style="color: ${iconColor}">${getIcon(child.icon)}</span>
                     <span class="name">${child.display_name}</span>
-                    <span class="${typeBadgeClass}">${child.node_type}</span>
+                    ${hintHtml}
+                    <span class="type-badge" style="${badgeStyle}">${child.node_type}</span>
                 `;
 
+                // ── Click behavior ───────────────────────────────────────
                 row.addEventListener("click", () => {
-                    if (isClip) {
-                        // Select this clip
+                    if (selectable) {
+                        // Select this node
                         this.overlay.querySelectorAll(".wiretap-node.selected")
                             .forEach((n) => n.classList.remove("selected"));
                         row.classList.add("selected");
                         this.selectedNode = child;
                         this.overlay.querySelector("#wt-select").disabled = false;
-                        this._showClipInfo(child);
-                    } else if (child.has_children !== false) {
-                        // Browse into this node
-                        this.currentPath = child.node_id;
-                        this.pathHistory.push({
-                            path: child.node_id,
-                            name: child.display_name,
-                        });
-                        this.selectedNode = null;
-                        this.overlay.querySelector("#wt-select").disabled = true;
-                        this.overlay.querySelector("#wt-clip-info").style.display = "none";
-                        this._loadChildren(child.node_id);
+                        this._showInfo(child);
+                    } else if (canBrowse) {
+                        this._browseInto(child);
                     }
                 });
 
-                // Double-click on clips also selects and confirms
-                if (isClip) {
-                    row.addEventListener("dblclick", () => {
+                // ── Double-click behavior ────────────────────────────────
+                row.addEventListener("dblclick", () => {
+                    if (selectable && this.mode === "destination" && canBrowse) {
+                        // In destination mode, double-click on a selectable
+                        // container browses into it (single click selects)
+                        this._browseInto(child);
+                    } else if (selectable) {
+                        // In source mode, double-click confirms selection
                         this.selectedNode = child;
                         this.onSelect(child);
                         this.close();
-                    });
-                }
+                    }
+                });
 
                 tree.appendChild(row);
             });
@@ -314,77 +408,125 @@ class WiretapBrowserDialog {
         }
     }
 
-    _showClipInfo(clip) {
-        const info = this.overlay.querySelector("#wt-clip-info");
-        if (!clip.is_clip) {
-            info.style.display = "none";
-            return;
+    _browseInto(child) {
+        this.currentPath = child.node_id;
+        this.pathHistory.push({ path: child.node_id, name: child.display_name });
+        this._clearSelection();
+        this._loadChildren(child.node_id);
+    }
+
+    _showInfo(child) {
+        const panel = this.overlay.querySelector("#wt-info");
+        const hint = this.overlay.querySelector("#wt-footer-hint");
+
+        if (this.mode === "source" && child.is_clip) {
+            panel.className = "wiretap-info-panel clip-info";
+            panel.style.display = "flex";
+            panel.innerHTML = `
+                <div class="info-item"><span class="info-label">Resolution:</span> ${child.width}×${child.height}</div>
+                <div class="info-item"><span class="info-label">Frames:</span> ${child.num_frames}</div>
+                <div class="info-item"><span class="info-label">Depth:</span> ${child.bit_depth}-bit</div>
+                <div class="info-item"><span class="info-label">FPS:</span> ${child.fps}</div>
+                <div class="info-item"><span class="info-label">Scan:</span> ${child.scan_format || 'N/A'}</div>
+            `;
+            hint.textContent = `Selected: ${child.display_name}`;
+
+        } else if (this.mode === "destination") {
+            panel.className = "wiretap-info-panel";
+            panel.style.display = "block";
+            panel.innerHTML = `
+                <strong style="color: #2ecc71;">Write destination:</strong>
+                ${child.display_name} (${child.node_type})
+                <div class="dest-path">${child.node_id}</div>
+            `;
+            hint.textContent = `Clips will be created in: ${child.display_name}`;
+
+        } else {
+            panel.style.display = "none";
+            hint.textContent = `Selected: ${child.display_name}`;
         }
-        info.style.display = "flex";
-        info.innerHTML = `
-            <div class="info-item"><span class="info-label">Resolution:</span> ${clip.width}×${clip.height}</div>
-            <div class="info-item"><span class="info-label">Frames:</span> ${clip.num_frames}</div>
-            <div class="info-item"><span class="info-label">Depth:</span> ${clip.bit_depth}-bit</div>
-            <div class="info-item"><span class="info-label">FPS:</span> ${clip.fps}</div>
-            <div class="info-item"><span class="info-label">Scan:</span> ${clip.scan_format || 'N/A'}</div>
-        `;
     }
 }
 
 
-// Register the ComfyUI extension
+// ─── ComfyUI Extension ──────────────────────────────────────────────────────
+
 app.registerExtension({
     name: "Wiretap.Browser",
 
-    async beforeRegisterNodeDef(nodeType, nodeData, app) {
-        if (nodeData.name !== "WiretapBrowser") return;
+    async beforeRegisterNodeDef(nodeType, nodeData, appInstance) {
 
-        const origOnNodeCreated = nodeType.prototype.onNodeCreated;
-        nodeType.prototype.onNodeCreated = function () {
-            if (origOnNodeCreated) origOnNodeCreated.apply(this, arguments);
+        // ── Source Browser: WiretapBrowser ────────────────────────────────
+        if (nodeData.name === "WiretapBrowser") {
+            const orig = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function () {
+                if (orig) orig.apply(this, arguments);
 
-            // Add "Browse" button widget
-            const browseBtn = this.addWidget("button", "Browse Flame", null, () => {
-                const hostnameWidget = this.widgets.find(w => w.name === "hostname");
-                const serverTypeWidget = this.widgets.find(w => w.name === "server_type");
-                const clipIdWidget = this.widgets.find(w => w.name === "clip_node_id");
+                this.addWidget("button", "🔥 Browse Source", null, () => {
+                    const hostname = this.widgets.find(w => w.name === "hostname")?.value || "localhost";
+                    const serverType = this.widgets.find(w => w.name === "server_type")?.value || "IFFFS";
+                    const clipIdWidget = this.widgets.find(w => w.name === "clip_node_id");
 
-                const hostname = hostnameWidget?.value || "localhost";
-                const serverType = serverTypeWidget?.value || "IFFFS";
+                    const dialog = new WiretapBrowserDialog(
+                        hostname, serverType, "source",
+                        (clip) => {
+                            if (clipIdWidget) clipIdWidget.value = clip.node_id;
+                            app.graph.setDirtyCanvas(true);
+                        }
+                    );
+                    dialog.open();
+                }).serialize = false;
+            };
 
-                const dialog = new WiretapBrowserDialog(hostname, serverType, (clip) => {
-                    if (clipIdWidget) {
-                        clipIdWidget.value = clip.node_id;
-                    }
-                    // Trigger node update
-                    app.graph.setDirtyCanvas(true);
-                });
+            const origDraw = nodeType.prototype.onDrawForeground;
+            nodeType.prototype.onDrawForeground = function (ctx) {
+                if (origDraw) origDraw.apply(this, arguments);
+                const w = this.widgets?.find(w => w.name === "clip_node_id");
+                if (w?.value) {
+                    ctx.fillStyle = "#ff6b35";
+                    ctx.beginPath();
+                    ctx.arc(this.size[0] - 14, 14, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            };
+        }
 
-                dialog.open();
-            });
+        // ── Destination Browser: WiretapFrameWriter ──────────────────────
+        if (nodeData.name === "WiretapFrameWriter") {
+            const orig = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function () {
+                if (orig) orig.apply(this, arguments);
 
-            // Style the browse button
-            browseBtn.serialize = false;
-        };
+                this.addWidget("button", "📁 Browse Destination", null, () => {
+                    const hostname = this.widgets.find(w => w.name === "hostname")?.value || "localhost";
+                    const destWidget = this.widgets.find(w => w.name === "destination_node_id");
 
-        // Customize the node appearance
-        const origOnDrawForeground = nodeType.prototype.onDrawForeground;
-        nodeType.prototype.onDrawForeground = function (ctx) {
-            if (origOnDrawForeground) origOnDrawForeground.apply(this, arguments);
+                    const dialog = new WiretapBrowserDialog(
+                        hostname, "IFFFS", "destination",
+                        (node) => {
+                            if (destWidget) destWidget.value = node.node_id;
+                            app.graph.setDirtyCanvas(true);
+                        }
+                    );
+                    dialog.open();
+                }).serialize = false;
+            };
 
-            // Show a small Flame icon indicator
-            const clipIdWidget = this.widgets?.find(w => w.name === "clip_node_id");
-            if (clipIdWidget?.value) {
-                ctx.fillStyle = "#ff6b35";
-                ctx.beginPath();
-                ctx.arc(this.size[0] - 14, 14, 5, 0, Math.PI * 2);
-                ctx.fill();
-            }
-        };
+            const origDraw = nodeType.prototype.onDrawForeground;
+            nodeType.prototype.onDrawForeground = function (ctx) {
+                if (origDraw) origDraw.apply(this, arguments);
+                const w = this.widgets?.find(w => w.name === "destination_node_id");
+                if (w?.value) {
+                    ctx.fillStyle = "#2ecc71";
+                    ctx.beginPath();
+                    ctx.arc(this.size[0] - 14, 14, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            };
+        }
     },
 
     async setup() {
-        // Listen for server status messages
         api.addEventListener("wiretap.server.status", (event) => {
             console.log("[Wiretap]", event.detail.status);
         });

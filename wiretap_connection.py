@@ -419,6 +419,7 @@ class WiretapConnectionManager:
                     NodeType.PROJECT, hostname
                 ),
             ],
+            # ── MyProject ──────────────────────────────────────────────
             "/projects/MyProject": [
                 WiretapNode(
                     "/projects/MyProject/workspace_001", "Workspace",
@@ -438,11 +439,19 @@ class WiretapConnectionManager:
                     "/projects/MyProject/shared_libs/lib_002", "Source Library",
                     NodeType.LIBRARY, hostname
                 ),
+                WiretapNode(
+                    "/projects/MyProject/shared_libs/lib_003", "AI Output",
+                    NodeType.LIBRARY, hostname
+                ),
             ],
             "/projects/MyProject/shared_libs/lib_001": [
                 WiretapNode(
                     "/projects/MyProject/shared_libs/lib_001/reel_001",
                     "Hero Comp", NodeType.REEL, hostname
+                ),
+                WiretapNode(
+                    "/projects/MyProject/shared_libs/lib_001/reel_002",
+                    "BG Plates", NodeType.REEL, hostname
                 ),
             ],
             "/projects/MyProject/shared_libs/lib_001/reel_001": [
@@ -459,6 +468,112 @@ class WiretapConnectionManager:
                     scan_format="Progressive",
                 ),
             ],
+            "/projects/MyProject/shared_libs/lib_001/reel_002": [
+                WiretapNode(
+                    "/projects/MyProject/shared_libs/lib_001/reel_002/clip_003",
+                    "bg_cityscape", NodeType.CLIP, hostname,
+                    num_frames=120, width=3840, height=2160, bit_depth=16, fps=24.0,
+                    scan_format="Progressive",
+                ),
+            ],
+            "/projects/MyProject/shared_libs/lib_002": [
+                WiretapNode(
+                    "/projects/MyProject/shared_libs/lib_002/reel_003",
+                    "Camera A", NodeType.REEL, hostname
+                ),
+                WiretapNode(
+                    "/projects/MyProject/shared_libs/lib_002/reel_004",
+                    "Camera B", NodeType.REEL, hostname
+                ),
+            ],
+            "/projects/MyProject/shared_libs/lib_002/reel_003": [
+                WiretapNode(
+                    "/projects/MyProject/shared_libs/lib_002/reel_003/clip_004",
+                    "A001_C003_0210KV", NodeType.CLIP, hostname,
+                    num_frames=240, width=4096, height=2160, bit_depth=12, fps=24.0,
+                    scan_format="Progressive",
+                ),
+            ],
+            "/projects/MyProject/shared_libs/lib_002/reel_004": [
+                WiretapNode(
+                    "/projects/MyProject/shared_libs/lib_002/reel_004/clip_005",
+                    "B001_C001_0210KV", NodeType.CLIP, hostname,
+                    num_frames=180, width=4096, height=2160, bit_depth=12, fps=24.0,
+                    scan_format="Progressive",
+                ),
+            ],
+            # AI Output library — empty reels ready for write destinations
+            "/projects/MyProject/shared_libs/lib_003": [
+                WiretapNode(
+                    "/projects/MyProject/shared_libs/lib_003/reel_005",
+                    "Upscaled", NodeType.REEL, hostname
+                ),
+                WiretapNode(
+                    "/projects/MyProject/shared_libs/lib_003/reel_006",
+                    "Style Transfer", NodeType.REEL, hostname
+                ),
+                WiretapNode(
+                    "/projects/MyProject/shared_libs/lib_003/reel_007",
+                    "Inpainting", NodeType.REEL, hostname
+                ),
+            ],
+            "/projects/MyProject/shared_libs/lib_003/reel_005": [],
+            "/projects/MyProject/shared_libs/lib_003/reel_006": [],
+            "/projects/MyProject/shared_libs/lib_003/reel_007": [],
+            # ── CommercialSpot ─────────────────────────────────────────
+            "/projects/CommercialSpot": [
+                WiretapNode(
+                    "/projects/CommercialSpot/workspace_002", "Workspace",
+                    NodeType.WORKSPACE, hostname
+                ),
+                WiretapNode(
+                    "/projects/CommercialSpot/shared_libs", "Shared Libraries",
+                    NodeType.LIBRARY_LIST, hostname
+                ),
+            ],
+            "/projects/CommercialSpot/shared_libs": [
+                WiretapNode(
+                    "/projects/CommercialSpot/shared_libs/lib_010", "Edit Library",
+                    NodeType.LIBRARY, hostname
+                ),
+                WiretapNode(
+                    "/projects/CommercialSpot/shared_libs/lib_011", "VFX Deliveries",
+                    NodeType.LIBRARY, hostname
+                ),
+            ],
+            "/projects/CommercialSpot/shared_libs/lib_010": [
+                WiretapNode(
+                    "/projects/CommercialSpot/shared_libs/lib_010/reel_010",
+                    "30sec Cut", NodeType.REEL, hostname
+                ),
+            ],
+            "/projects/CommercialSpot/shared_libs/lib_010/reel_010": [
+                WiretapNode(
+                    "/projects/CommercialSpot/shared_libs/lib_010/reel_010/clip_010",
+                    "spot_30s_v02", NodeType.CLIP, hostname,
+                    num_frames=720, width=1920, height=1080, bit_depth=10, fps=24.0,
+                    scan_format="Progressive",
+                ),
+            ],
+            "/projects/CommercialSpot/shared_libs/lib_011": [
+                WiretapNode(
+                    "/projects/CommercialSpot/shared_libs/lib_011/reel_011",
+                    "Received", NodeType.REEL, hostname
+                ),
+                WiretapNode(
+                    "/projects/CommercialSpot/shared_libs/lib_011/reel_012",
+                    "AI Processed", NodeType.REEL, hostname
+                ),
+            ],
+            "/projects/CommercialSpot/shared_libs/lib_011/reel_011": [
+                WiretapNode(
+                    "/projects/CommercialSpot/shared_libs/lib_011/reel_011/clip_011",
+                    "vfx_shot_010_v01", NodeType.CLIP, hostname,
+                    num_frames=64, width=2048, height=1152, bit_depth=32, fps=24.0,
+                    scan_format="Progressive",
+                ),
+            ],
+            "/projects/CommercialSpot/shared_libs/lib_011/reel_012": [],
         }
 
         return mock_tree.get(node_id, [])
