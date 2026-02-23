@@ -285,9 +285,9 @@ class WiretapConnectionManager:
         if server_id_str not in self._servers:
             if server_type == "Gateway":
                 sid = WireTapServerId("Gateway", hostname)
-                self._servers[server_id_str] = WireTapServerHandle(sid)
             else:
-                self._servers[server_id_str] = WireTapServerHandle(server_id_str)
+                sid = WireTapServerId(hostname, server_type)
+            self._servers[server_id_str] = WireTapServerHandle(sid)
             logger.info(f"Connected to Wiretap server: {server_id_str}")
         return self._servers[server_id_str]
 
@@ -321,7 +321,7 @@ class WiretapConnectionManager:
             return []
 
         children = []
-        for i in range(num_children):
+        for i in range(int(num_children)):
             child_handle = WireTapNodeHandle()
             child_name = WireTapStr()
             child_type = WireTapStr()
@@ -336,8 +336,7 @@ class WiretapConnectionManager:
             if not child_handle.getNodeTypeStr(child_type):
                 child_type = WireTapStr("UNKNOWN")
 
-            child_node_id = WireTapStr()
-            child_handle.getNodeId(child_node_id)
+            child_node_id = child_handle.getNodeId().id()
 
             node_type = NodeType.from_string(str(child_type))
             node = WiretapNode(
