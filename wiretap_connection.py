@@ -413,13 +413,38 @@ class WiretapConnectionManager:
                 if node_handle.getNumFrames(num_frames):
                     node.num_frames = int(num_frames)
 
-                scan = fmt.scanFormat()
-                if scan == WireTapClipFormat.SCAN_FORMAT_PROGRESSIVE:
-                    node.scan_format = "Progressive"
-                elif scan == WireTapClipFormat.SCAN_FORMAT_FIELD_1:
-                    node.scan_format = "Field 1"
-                elif scan == WireTapClipFormat.SCAN_FORMAT_FIELD_2:
-                    node.scan_format = "Field 2"
+                try:
+                    scan = fmt.scanFormat()
+                    # The constant location varies across SDK versions
+                    _prog = getattr(
+                        WireTapClipFormat, "SCAN_FORMAT_PROGRESSIVE",
+                        getattr(
+                            getattr(WireTapClipFormat, "ScanFormat", None),
+                            "SCAN_FORMAT_PROGRESSIVE", 0,
+                        ),
+                    )
+                    _f1 = getattr(
+                        WireTapClipFormat, "SCAN_FORMAT_FIELD_1",
+                        getattr(
+                            getattr(WireTapClipFormat, "ScanFormat", None),
+                            "SCAN_FORMAT_FIELD_1", 1,
+                        ),
+                    )
+                    _f2 = getattr(
+                        WireTapClipFormat, "SCAN_FORMAT_FIELD_2",
+                        getattr(
+                            getattr(WireTapClipFormat, "ScanFormat", None),
+                            "SCAN_FORMAT_FIELD_2", 2,
+                        ),
+                    )
+                    if scan == _prog:
+                        node.scan_format = "Progressive"
+                    elif scan == _f1:
+                        node.scan_format = "Field 1"
+                    elif scan == _f2:
+                        node.scan_format = "Field 2"
+                except Exception:
+                    pass
 
                 node.pixel_format = "RGB"
                 node.has_children = True  # clips can have hires/lowres sub-nodes
@@ -487,12 +512,10 @@ class WiretapConnectionManager:
             logger.error(f"Failed to get clip format: {node_handle.lastError()}")
             return None
 
-        import ctypes
-
         buffer_size = fmt.frameBufferSize()
-        # The SWIG wrapper expects a char* — use ctypes to allocate a
-        # mutable C-compatible string buffer.
-        buff = ctypes.create_string_buffer(buffer_size)
+        # The Boost.Python/SWIG wrapper maps char* to Python str.
+        # Passing a null-byte string lets the C layer write into it.
+        buff = "\0" * buffer_size
 
         if not node_handle.readFrame(frame_number, buff, buffer_size):
             logger.error(
@@ -509,7 +532,10 @@ class WiretapConnectionManager:
             "frame_buffer_size": buffer_size,
         }
 
-        return (buff.raw, format_info)
+        # Convert the str buffer to bytes; latin-1 is a 1:1 byte mapping.
+        raw_bytes = buff.encode("latin-1") if isinstance(buff, str) else buff
+
+        return (raw_bytes, format_info)
 
     # -----------------------------------------------------------------------
     # Mock mode for development without a Flame workstation

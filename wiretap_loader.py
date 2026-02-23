@@ -399,7 +399,13 @@ class WiretapFrameWriter:
             3,        # num channels
             fps,      # frame rate
             1,        # pixel ratio
-            WireTapClipFormat.ScanFormat.SCAN_FORMAT_PROGRESSIVE,
+            getattr(
+                WireTapClipFormat, "SCAN_FORMAT_PROGRESSIVE",
+                getattr(
+                    getattr(WireTapClipFormat, "ScanFormat", None),
+                    "SCAN_FORMAT_PROGRESSIVE", 0,
+                ),
+            ),
             WireTapClipFormat.FORMAT_RGB(),
         )
 
