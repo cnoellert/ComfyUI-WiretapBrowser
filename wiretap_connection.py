@@ -22,6 +22,8 @@ logger = logging.getLogger("ComfyUI-WiretapBrowser")
 # ---------------------------------------------------------------------------
 
 import glob
+import subprocess
+import json as _json
 
 # Static paths to check first
 WIRETAP_SDK_PATHS = [
@@ -56,29 +58,72 @@ for sdk_path in WIRETAP_SDK_PATHS:
     if sdk_path and os.path.isdir(sdk_path) and sdk_path not in sys.path:
         sys.path.insert(0, sdk_path)
 
-try:
-    from adsk.libwiretapPythonClientAPI import (
-        WireTapClient,
-        WireTapClientInit,
-        WireTapClientUninit,
-        WireTapServerHandle,
-        WireTapServerId,
-        WireTapNodeHandle,
-        WireTapStr,
-        WireTapInt,
-        WireTapClipFormat,
-    )
-    _wiretap_available = True
-    # Log which path resolved
-    import adsk.libwiretapPythonClientAPI as _wt_mod
-    logger.info(f"Wiretap SDK loaded from: {getattr(_wt_mod, '__file__', 'unknown')}")
-except ImportError as e:
-    _wiretap_import_error = str(e)
+# ---------------------------------------------------------------------------
+# Safe import: the Wiretap .so can crash (segfault) if dependent libraries
+# are missing or incompatible. We first probe the import in a subprocess to
+# make sure it's safe before loading it into the main ComfyUI process.
+# ---------------------------------------------------------------------------
+
+def _probe_wiretap_import() -> Tuple[bool, str]:
+    """Test Wiretap import in an isolated subprocess. Returns (ok, message)."""
+    probe_script = ";".join([
+        "import sys",
+        f"sys.path = {sys.path!r}",
+        "try:",
+        "    from adsk.libwiretapPythonClientAPI import WireTapClient",
+        "    print('OK')",
+        "except Exception as e:",
+        "    print(f'FAIL:{e}')",
+    ])
+    # Use the same Python interpreter
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", probe_script],
+            capture_output=True, text=True, timeout=10,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        output = result.stdout.strip()
+        if output == "OK":
+            return True, "probe passed"
+        elif output.startswith("FAIL:"):
+            return False, output[5:]
+        else:
+            # Crashed (segfault, abort, etc.)
+            return False, f"probe crashed (rc={result.returncode}): {result.stderr.strip()[:200]}"
+    except subprocess.TimeoutExpired:
+        return False, "probe timed out"
+    except Exception as e:
+        return False, f"probe error: {e}"
+
+
+# Run the probe
+_probe_ok, _probe_msg = _probe_wiretap_import()
+
+if _probe_ok:
+    try:
+        from adsk.libwiretapPythonClientAPI import (
+            WireTapClient,
+            WireTapClientInit,
+            WireTapClientUninit,
+            WireTapServerHandle,
+            WireTapServerId,
+            WireTapNodeHandle,
+            WireTapStr,
+            WireTapInt,
+            WireTapClipFormat,
+        )
+        _wiretap_available = True
+        import adsk.libwiretapPythonClientAPI as _wt_mod
+        logger.info(f"Wiretap SDK loaded from: {getattr(_wt_mod, '__file__', 'unknown')}")
+    except Exception as e:
+        _wiretap_import_error = str(e)
+        logger.warning(f"Wiretap SDK import failed after probe: {e}")
+else:
+    _wiretap_import_error = _probe_msg
     logger.warning(
-        f"Wiretap SDK not found: {e}. "
+        f"Wiretap SDK probe failed: {_probe_msg}. "
         f"Python {sys.version_info.major}.{sys.version_info.minor} | "
         f"Searched: {[p for p in WIRETAP_SDK_PATHS if p]}. "
-        f"Set WIRETAP_SDK_PATH or install the Wiretap SDK. "
         f"The browser will run in MOCK mode for development."
     )
 
