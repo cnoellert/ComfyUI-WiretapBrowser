@@ -21,6 +21,9 @@ logger = logging.getLogger("ComfyUI-WiretapBrowser")
 # Users can also set WIRETAP_SDK_PATH environment variable.
 # ---------------------------------------------------------------------------
 
+import glob
+
+# Static paths to check first
 WIRETAP_SDK_PATHS = [
     os.environ.get("WIRETAP_SDK_PATH", ""),
     "/opt/Autodesk/wiretap/tools/current/python",
@@ -28,6 +31,23 @@ WIRETAP_SDK_PATHS = [
     "/opt/Autodesk/wiretap/tools/current",
     "/usr/discreet/wiretap/tools/current",
 ]
+
+# Dynamically discover Autodesk Python site-packages containing the adsk module.
+# Flame installs its Python SDK at paths like:
+#   /opt/Autodesk/python/<version>/lib/python3.11/site-packages/
+# The .so lives under an `adsk` subdir there.
+_dynamic_paths = sorted(
+    glob.glob("/opt/Autodesk/python/*/lib/python*/site-packages"),
+    reverse=True,  # newest version first
+)
+WIRETAP_SDK_PATHS.extend(_dynamic_paths)
+
+# Also check the flamefamily python dirs
+_dynamic_paths2 = sorted(
+    glob.glob("/opt/Autodesk/.flamefamily_*/python"),
+    reverse=True,
+)
+WIRETAP_SDK_PATHS.extend(_dynamic_paths2)
 
 _wiretap_available = False
 _wiretap_import_error = None
@@ -49,10 +69,15 @@ try:
         WireTapClipFormat,
     )
     _wiretap_available = True
+    # Log which path resolved
+    import adsk.libwiretapPythonClientAPI as _wt_mod
+    logger.info(f"Wiretap SDK loaded from: {getattr(_wt_mod, '__file__', 'unknown')}")
 except ImportError as e:
     _wiretap_import_error = str(e)
     logger.warning(
         f"Wiretap SDK not found: {e}. "
+        f"Python {sys.version_info.major}.{sys.version_info.minor} | "
+        f"Searched: {[p for p in WIRETAP_SDK_PATHS if p]}. "
         f"Set WIRETAP_SDK_PATH or install the Wiretap SDK. "
         f"The browser will run in MOCK mode for development."
     )
