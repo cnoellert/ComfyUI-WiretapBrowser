@@ -62,6 +62,9 @@ def raw_rgb_to_tensor(
         )
         image = _decode_8bit(arr, width, height)
 
+    # Wiretap stores frames bottom-to-top (like BMP/OpenGL); flip to top-down.
+    image = np.flipud(image)
+
     # Ensure correct shape: (H, W, 3) float32 in [0, 1]
     if image.ndim == 2:
         image = np.stack([image] * 3, axis=-1)
@@ -81,7 +84,7 @@ def raw_rgb_to_tensor(
 def _decode_8bit(arr: np.ndarray, width: int, height: int) -> np.ndarray:
     """
     Decode 8-bit RGB: 3 bytes/pixel, packed.
-    Wiretap stores as BGR in scan-line order, top to bottom, left to right.
+    Scan-line order, left to right. Vertical flip handled by caller.
     """
     bytes_per_pixel = 3
     # Calculate scan line padding to 32-bit boundary

@@ -488,8 +488,10 @@ class WiretapConnectionManager:
             return None
 
         buffer_size = fmt.frameBufferSize()
-        # Wiretap Python API expects a string buffer pre-allocated to the right size
-        buff = "\0" * buffer_size
+        # Allocate a mutable byte buffer for the C SDK to write into.
+        # Using a bytearray avoids the Python 3 str/Unicode issue where
+        # immutable string objects can't reliably receive raw binary data.
+        buff = bytearray(buffer_size)
 
         if not node_handle.readFrame(frame_number, buff, buffer_size):
             logger.error(
@@ -506,10 +508,7 @@ class WiretapConnectionManager:
             "frame_buffer_size": buffer_size,
         }
 
-        # Convert string buffer to bytes
-        raw_bytes = buff.encode("latin-1") if isinstance(buff, str) else buff
-
-        return (raw_bytes, format_info)
+        return (bytes(buff), format_info)
 
     # -----------------------------------------------------------------------
     # Mock mode for development without a Flame workstation
