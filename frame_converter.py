@@ -65,6 +65,16 @@ def raw_rgb_to_tensor(
     # Wiretap stores frames bottom-to-top (like BMP/OpenGL); flip to top-down.
     image = np.flipud(image)
 
+    # Apply colour space conversion if the source is scene-linear.
+    # ComfyUI preview expects sRGB, so linear data looks crushed/posterized
+    # without a transfer function.
+    colour_space = format_info.get("colour_space", "").lower()
+    if colour_space in (
+        "acescg", "aces", "linear", "scene-linear", "lin_ap1",
+        "aces - acescg", "aces - aces2065-1",
+    ):
+        image = _linear_to_srgb(image)
+
     # Ensure correct shape: (H, W, 3) float32 in [0, 1]
     if image.ndim == 2:
         image = np.stack([image] * 3, axis=-1)
@@ -79,6 +89,15 @@ def raw_rgb_to_tensor(
         tensor = tensor.unsqueeze(0)
 
     return tensor
+
+
+def _linear_to_srgb(image: np.ndarray) -> np.ndarray:
+    """Apply the sRGB transfer function (linear → sRGB gamma)."""
+    image = np.clip(image, 0.0, 1.0)
+    # sRGB piecewise transfer: linear below 0.0031308, power curve above
+    low = image * 12.92
+    high = 1.055 * np.power(image, 1.0 / 2.4) - 0.055
+    return np.where(image <= 0.0031308, low, high)
 
 
 def _decode_8bit(arr: np.ndarray, width: int, height: int) -> np.ndarray:

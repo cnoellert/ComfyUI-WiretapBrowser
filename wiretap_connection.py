@@ -485,6 +485,8 @@ class WiretapConnectionManager:
             "num_frames": int(num_frames),
             "frame_buffer_size": fmt.frameBufferSize(),
             "pixel_ratio": fmt.pixelRatio(),
+            "format_tag": fmt.formatTag(),
+            "colour_space": fmt.colourSpace(),
         }
 
     def read_frame(
@@ -530,6 +532,8 @@ class WiretapConnectionManager:
             "num_channels": fmt.numChannels(),
             "bit_depth": fmt.bitsPerPixel() // max(fmt.numChannels(), 1),
             "frame_buffer_size": buffer_size,
+            "format_tag": fmt.formatTag(),
+            "colour_space": fmt.colourSpace(),
         }
 
         # Convert the str buffer to bytes; latin-1 is a 1:1 byte mapping.
