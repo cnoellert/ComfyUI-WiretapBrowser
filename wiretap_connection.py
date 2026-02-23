@@ -66,15 +66,15 @@ for sdk_path in WIRETAP_SDK_PATHS:
 
 def _probe_wiretap_import() -> Tuple[bool, str]:
     """Test Wiretap import in an isolated subprocess. Returns (ok, message)."""
-    probe_script = ";".join([
-        "import sys",
-        f"sys.path = {sys.path!r}",
-        "try:",
-        "    from adsk.libwiretapPythonClientAPI import WireTapClient",
-        "    print('OK')",
-        "except Exception as e:",
-        "    print(f'FAIL:{e}')",
-    ])
+    probe_script = (
+        "import sys\n"
+        f"sys.path = {sys.path!r}\n"
+        "try:\n"
+        "    from adsk.libwiretapPythonClientAPI import WireTapClient\n"
+        "    print('OK')\n"
+        "except Exception as e:\n"
+        "    print(f'FAIL:{e}')\n"
+    )
     # Use the same Python interpreter
     try:
         result = subprocess.run(
