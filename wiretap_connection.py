@@ -54,9 +54,12 @@ WIRETAP_SDK_PATHS.extend(_dynamic_paths2)
 _wiretap_available = False
 _wiretap_import_error = None
 
-for sdk_path in WIRETAP_SDK_PATHS:
-    if sdk_path and os.path.isdir(sdk_path) and sdk_path not in sys.path:
-        sys.path.insert(0, sdk_path)
+# Insert paths in priority order: first entry in the list should win.
+# We build the ordered list first, then prepend them so index-0 ends up
+# earliest on sys.path.
+_sdk_candidates = [p for p in WIRETAP_SDK_PATHS if p and os.path.isdir(p) and p not in sys.path]
+for sdk_path in reversed(_sdk_candidates):
+    sys.path.insert(0, sdk_path)
 
 # ---------------------------------------------------------------------------
 # Safe import: the Wiretap .so can crash (segfault) if dependent libraries
