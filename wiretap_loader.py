@@ -54,9 +54,10 @@ class WiretapClipLoader:
                     "forceInput": True,
                     "description": "Flame workstation hostname",
                 }),
-                "server_type": (["IFFFS", "Gateway"], {
+                "server_type": ("STRING", {
                     "default": "IFFFS",
                     "forceInput": True,
+                    "description": "IFFFS or Gateway",
                 }),
                 "start_frame": ("INT", {
                     "default": 0,
