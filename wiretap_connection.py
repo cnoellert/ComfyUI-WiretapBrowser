@@ -280,16 +280,58 @@ class WiretapConnectionManager:
             logger.info("Wiretap client shut down")
 
     def _get_server_handle(self, hostname: str, server_type: str = "IFFFS"):
-        """Get or create a server handle."""
+        """Get or create a server handle.
+
+        Probes multiple WireTapServerId constructor signatures because the
+        argument order varies across SDK versions.  The first signature that
+        produces a working connection (validated by listing root children) is
+        cached so subsequent calls skip the probe.
+        """
         server_id_str = f"{hostname}:{server_type}"
-        if server_id_str not in self._servers:
-            if server_type == "Gateway":
-                sid = WireTapServerId("Gateway", hostname)
-            else:
-                sid = WireTapServerId(hostname, server_type)
-            self._servers[server_id_str] = WireTapServerHandle(sid)
-            logger.info(f"Connected to Wiretap server: {server_id_str}")
-        return self._servers[server_id_str]
+        if server_id_str in self._servers:
+            return self._servers[server_id_str]
+
+        # Build candidate constructor arg tuples
+        if server_type == "Gateway":
+            candidates = [
+                ("Gateway", hostname),
+                (hostname, "Gateway"),
+                (f"Gateway:{hostname}",),
+            ]
+        else:
+            candidates = [
+                (hostname, server_type),
+                (server_type, hostname),
+                (f"{hostname}:{server_type}",),
+            ]
+
+        for args in candidates:
+            try:
+                sid = WireTapServerId(*args)
+                handle = WireTapServerHandle(sid)
+                # Validate: attempt to list root children
+                test_node = WireTapNodeHandle(handle, "/")
+                num = WireTapInt(0)
+                if test_node.getNumChildren(num):
+                    logger.info(
+                        f"Connected to {server_id_str} "
+                        f"using WireTapServerId{args}"
+                    )
+                    self._servers[server_id_str] = handle
+                    return handle
+                else:
+                    logger.debug(
+                        f"WireTapServerId{args} created but "
+                        f"getNumChildren failed: {test_node.lastError()}"
+                    )
+            except Exception as e:
+                logger.debug(f"WireTapServerId{args} failed: {e}")
+
+        raise ConnectionError(
+            f"Could not connect to Wiretap server {server_id_str}. "
+            f"Tried {len(candidates)} constructor signatures. "
+            f"Verify the server is running and accessible."
+        )
 
     def get_children(
         self, hostname: str, node_id: str = "/", server_type: str = "IFFFS"

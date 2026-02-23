@@ -382,15 +382,14 @@ class WiretapFrameWriter:
         the format to raw RGB) and then writes the buffer to an IFFFS clip.
         """
         from adsk.libwiretapPythonClientAPI import (
-            WireTapServerHandle,
-            WireTapServerId,
             WireTapNodeHandle,
             WireTapClipFormat,
             WireTapStr,
         )
 
-        # Create the destination clip
-        server_handle = WireTapServerHandle(f"{hostname}:IFFFS")
+        # Create the destination clip — use the connection manager's probe
+        # logic to find the right WireTapServerId constructor signature.
+        server_handle = mgr._get_server_handle(hostname, "IFFFS")
         parent_handle = WireTapNodeHandle(server_handle, dest_node_id)
 
         clip_format = WireTapClipFormat(
@@ -417,8 +416,7 @@ class WiretapFrameWriter:
             )
 
         # Read each file through Gateway and write to IFFFS
-        gateway_sid = WireTapServerId("Gateway", hostname)
-        gateway_handle = WireTapServerHandle(gateway_sid)
+        gateway_handle = mgr._get_server_handle(hostname, "Gateway")
 
         dest_fmt = WireTapClipFormat()
         if not new_clip.getClipFormat(dest_fmt):
