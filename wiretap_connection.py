@@ -333,7 +333,7 @@ class WiretapConnectionManager:
             if not child_handle.getDisplayName(child_name):
                 child_name = WireTapStr(f"<unnamed_{i}>")
 
-            if not child_handle.getTypeStr(child_type):
+            if not child_handle.getNodeTypeStr(child_type):
                 child_type = WireTapStr("UNKNOWN")
 
             child_node_id = WireTapStr()
