@@ -487,11 +487,12 @@ class WiretapConnectionManager:
             logger.error(f"Failed to get clip format: {node_handle.lastError()}")
             return None
 
+        import ctypes
+
         buffer_size = fmt.frameBufferSize()
-        # Allocate a mutable byte buffer for the C SDK to write into.
-        # Using a bytearray avoids the Python 3 str/Unicode issue where
-        # immutable string objects can't reliably receive raw binary data.
-        buff = bytearray(buffer_size)
+        # The SWIG wrapper expects a char* — use ctypes to allocate a
+        # mutable C-compatible string buffer.
+        buff = ctypes.create_string_buffer(buffer_size)
 
         if not node_handle.readFrame(frame_number, buff, buffer_size):
             logger.error(
@@ -508,7 +509,7 @@ class WiretapConnectionManager:
             "frame_buffer_size": buffer_size,
         }
 
-        return (bytes(buff), format_info)
+        return (buff.raw, format_info)
 
     # -----------------------------------------------------------------------
     # Mock mode for development without a Flame workstation
