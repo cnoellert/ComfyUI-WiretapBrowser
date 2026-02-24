@@ -518,39 +518,7 @@ app.registerExtension({
             };
         }
 
-        // ── Destination Browser: WiretapFrameWriter ──────────────────────
-        if (nodeData.name === "WiretapFrameWriter") {
-            const orig = nodeType.prototype.onNodeCreated;
-            nodeType.prototype.onNodeCreated = function () {
-                if (orig) orig.apply(this, arguments);
-
-                this.addWidget("button", "📁 Browse Destination", null, () => {
-                    const hostname = this.widgets.find(w => w.name === "hostname")?.value || "localhost";
-                    const destWidget = this.widgets.find(w => w.name === "destination_node_id");
-
-                    const dialog = new WiretapBrowserDialog(
-                        hostname, "IFFFS", "destination",
-                        (node) => {
-                            if (destWidget) destWidget.value = node.node_id;
-                            app.graph.setDirtyCanvas(true);
-                        }
-                    );
-                    dialog.open();
-                }).serialize = false;
-            };
-
-            const origDraw = nodeType.prototype.onDrawForeground;
-            nodeType.prototype.onDrawForeground = function (ctx) {
-                if (origDraw) origDraw.apply(this, arguments);
-                const w = this.widgets?.find(w => w.name === "destination_node_id");
-                if (w?.value) {
-                    ctx.fillStyle = "#2ecc71";
-                    ctx.beginPath();
-                    ctx.arc(this.size[0] - 14, 14, 5, 0, Math.PI * 2);
-                    ctx.fill();
-                }
-            };
-        }
+        // ── WiretapFrameWriter writes EXR sequences to disk (no browser needed) ──
     },
 
     async setup() {

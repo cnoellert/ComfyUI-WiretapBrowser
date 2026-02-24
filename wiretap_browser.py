@@ -125,7 +125,7 @@ class WiretapBrowser:
 
     CATEGORY = "Wiretap/Flame"
     FUNCTION = "select_clip"
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "INT", "INT", "INT", "FLOAT")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "INT", "INT", "INT", "FLOAT", "STRING")
     RETURN_NAMES = (
         "clip_node_id",
         "hostname",
@@ -134,6 +134,7 @@ class WiretapBrowser:
         "height",
         "num_frames",
         "fps",
+        "colour_space",
     )
     OUTPUT_NODE = False
 
@@ -175,6 +176,7 @@ class WiretapBrowser:
         height = 0
         num_frames = 0
         fps = 0.0
+        colour_space = ""
 
         if clip_node_id:
             try:
@@ -185,10 +187,11 @@ class WiretapBrowser:
                     height = info.get("height", 0)
                     num_frames = info.get("num_frames", 0)
                     fps = info.get("frame_rate", 0.0)
+                    colour_space = info.get("colour_space", "")
             except Exception as e:
                 logger.error(f"Error fetching clip info: {e}")
 
-        return (clip_node_id, hostname, server_type, width, height, num_frames, fps)
+        return (clip_node_id, hostname, server_type, width, height, num_frames, fps, colour_space)
 
 
 # ---------------------------------------------------------------------------

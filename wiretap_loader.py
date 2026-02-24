@@ -34,8 +34,8 @@ class WiretapClipLoader:
 
     CATEGORY = "Wiretap/Flame"
     FUNCTION = "load_frames"
-    RETURN_TYPES = ("IMAGE", "INT", "INT", "INT", "FLOAT")
-    RETURN_NAMES = ("images", "width", "height", "frame_count", "fps")
+    RETURN_TYPES = ("IMAGE", "INT", "INT", "INT", "FLOAT", "STRING")
+    RETURN_NAMES = ("images", "width", "height", "frame_count", "fps", "colour_space")
     OUTPUT_NODE = False
 
     @classmethod
@@ -144,6 +144,7 @@ class WiretapClipLoader:
         fps = format_info.get("frame_rate", 24.0)
         width = format_info.get("width", 0)
         height = format_info.get("height", 0)
+        colour_space = format_info.get("colour_space", "")
 
         # Clamp frame range
         if start_frame >= total_frames:
@@ -187,7 +188,7 @@ class WiretapClipLoader:
             f"tensor shape {images.shape}"
         )
 
-        return (images, width, height, actual_count, fps)
+        return (images, width, height, actual_count, fps, colour_space)
 
     def _resize_batch(
         self, images: torch.Tensor, max_dim: int
@@ -214,28 +215,26 @@ class WiretapClipLoader:
     def _empty_result(self):
         """Return a minimal valid empty result."""
         empty = torch.zeros((1, 64, 64, 3), dtype=torch.float32)
-        return (empty, 64, 64, 0, 24.0)
+        return (empty, 64, 64, 0, 24.0, "")
 
 
 class WiretapFrameWriter:
     """
-    Write IMAGE tensor frames back to a Flame clip via Wiretap.
+    Write IMAGE tensor frames as an EXR image sequence to disk.
 
-    This is the round-trip companion to WiretapClipLoader — after
-    processing frames through AI nodes, write the results back to
-    a new or existing clip in Flame.
+    Saves processed frames as 32-bit float EXR files that can be
+    imported into Flame via MediaHub. Direct Wiretap IFFFS writes
+    are blocked while Flame has the project open (database lock),
+    so writing to disk is the reliable approach.
 
-    NOTE: Writing frames via Wiretap is complex (as noted in community
-    forums). This node uses the Gateway server workaround: write frames
-    to temp files on disk, then read them back through the Gateway server
-    and write to the IFFFS destination. This is the approach used by
-    TimewarpML and others.
+    The output_path string can be used to locate the sequence for
+    import into Flame or other applications.
     """
 
     CATEGORY = "Wiretap/Flame"
     FUNCTION = "write_frames"
     RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("result_node_id",)
+    RETURN_NAMES = ("output_path",)
     OUTPUT_NODE = True
 
     @classmethod
@@ -243,27 +242,30 @@ class WiretapFrameWriter:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "hostname": ("STRING", {
-                    "default": "localhost",
+                "output_directory": ("STRING", {
+                    "default": "/var/tmp/comfyui_output",
                     "multiline": False,
-                }),
-                "destination_node_id": ("STRING", {
-                    "default": "",
-                    "multiline": False,
-                    "description": (
-                        "Wiretap node ID of the destination "
-                        "(library or reel to write into)"
-                    ),
+                    "description": "Directory to write the EXR sequence into",
                 }),
                 "clip_name": ("STRING", {
                     "default": "comfyui_output",
                     "multiline": False,
+                    "description": "Base name for the image sequence",
                 }),
-                "fps": ("FLOAT", {
-                    "default": 24.0,
-                    "min": 1.0,
-                    "max": 120.0,
-                    "step": 0.001,
+                "start_frame": ("INT", {
+                    "default": 1001,
+                    "min": 0,
+                    "max": 9999999,
+                    "step": 1,
+                    "description": "Starting frame number for the sequence",
+                }),
+            },
+            "optional": {
+                "colour_space": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "forceInput": True,
+                    "description": "Colour space to embed in EXR metadata",
                 }),
             },
         }
@@ -271,192 +273,117 @@ class WiretapFrameWriter:
     def write_frames(
         self,
         images: torch.Tensor,
-        hostname: str,
-        destination_node_id: str,
+        output_directory: str,
         clip_name: str,
-        fps: float,
+        start_frame: int,
+        colour_space: str = "",
     ):
-        """
-        Write processed frames back to Flame via Wiretap.
-
-        Uses the Gateway server workaround:
-        1. Save frames as temp EXR/DPX files
-        2. Read via Gateway server into a buffer
-        3. Write buffer to IFFFS destination clip
-        """
-        if not destination_node_id:
-            logger.error("No destination_node_id provided")
-            return ("",)
-
-        if not is_wiretap_available():
-            logger.warning(
-                "Wiretap SDK not available. In mock mode, frames would be "
-                f"written to {destination_node_id}/{clip_name}"
-            )
-            return (f"{destination_node_id}/{clip_name}_mock",)
-
-        import tempfile
+        """Save frames as an EXR image sequence to disk."""
         import os
 
-        mgr = get_connection_manager()
-        mgr.initialize()
+        if not output_directory:
+            logger.error("No output_directory provided")
+            return ("",)
+
+        # Create the output directory
+        seq_dir = os.path.join(output_directory, clip_name)
+        os.makedirs(seq_dir, exist_ok=True)
 
         batch_size, h, w, c = images.shape
         logger.info(
-            f"Writing {batch_size} frames ({w}x{h}) to "
-            f"{destination_node_id}/{clip_name}"
+            f"Writing {batch_size} frames ({w}x{h}) to {seq_dir}"
         )
 
-        # Step 1: Save frames to temp directory as EXR files
-        temp_dir = tempfile.mkdtemp(prefix="comfyui_wiretap_")
-        temp_files = []
-
-        try:
-            for i in range(batch_size):
-                frame = images[i].cpu().numpy()
-                frame_uint16 = (np.clip(frame, 0.0, 1.0) * 65535).astype(np.uint16)
-
-                # Save as raw 16-bit RGB for Gateway to pick up
-                file_path = os.path.join(temp_dir, f"frame_{i:06d}.exr")
-                self._save_frame_exr(frame, file_path)
-                temp_files.append(file_path)
-
-            # Step 2 & 3: Use Wiretap Gateway + IFFFS to create the clip
-            result_node_id = self._create_clip_via_gateway(
-                mgr, hostname, destination_node_id, clip_name,
-                temp_files, w, h, fps,
+        written = 0
+        for i in range(batch_size):
+            frame_num = start_frame + i
+            frame = images[i].cpu().numpy()
+            file_path = os.path.join(
+                seq_dir, f"{clip_name}.{frame_num:07d}.exr"
             )
+            if self._save_frame_exr(frame, file_path, colour_space):
+                written += 1
 
-            return (result_node_id,)
+        logger.info(
+            f"Wrote {written}/{batch_size} frames to {seq_dir}"
+        )
 
-        except Exception as e:
-            logger.error(f"Error writing frames: {e}", exc_info=True)
-            return ("",)
+        return (seq_dir,)
 
-        finally:
-            # Cleanup temp files
-            for f in temp_files:
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
-            try:
-                os.rmdir(temp_dir)
-            except OSError:
-                pass
+    def _save_frame_exr(
+        self, frame_np: np.ndarray, path: str, colour_space: str = ""
+    ) -> bool:
+        """Save a single frame as a 32-bit float EXR file.
 
-    def _save_frame_exr(self, frame_np: np.ndarray, path: str):
-        """Save a frame as EXR using OpenEXR if available, otherwise fallback to raw."""
+        Tries OpenEXR first, then OpenImageIO, then falls back to
+        writing a 16-bit PNG via numpy/torch.
+        """
+        frame_f32 = np.clip(frame_np, 0.0, 1.0).astype(np.float32)
+
+        # Try OpenEXR
         try:
             import OpenEXR
             import Imath
 
-            h, w, c = frame_np.shape
+            h, w, c = frame_f32.shape
             header = OpenEXR.Header(w, h)
             float_chan = Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT))
-            header["channels"] = {"R": float_chan, "G": float_chan, "B": float_chan}
+            header["channels"] = {
+                "R": float_chan, "G": float_chan, "B": float_chan
+            }
+            if colour_space:
+                header["chromaticities"] = colour_space
 
-            r = frame_np[:, :, 0].astype(np.float32).tobytes()
-            g = frame_np[:, :, 1].astype(np.float32).tobytes()
-            b = frame_np[:, :, 2].astype(np.float32).tobytes()
+            r = frame_f32[:, :, 0].tobytes()
+            g = frame_f32[:, :, 1].tobytes()
+            b = frame_f32[:, :, 2].tobytes()
 
             out = OpenEXR.OutputFile(path, header)
             out.writePixels({"R": r, "G": g, "B": b})
             out.close()
-
+            return True
         except ImportError:
-            # Fallback: save as raw RGB float32 with a simple header
-            import struct
-            h, w, c = frame_np.shape
-            with open(path, "wb") as f:
-                f.write(struct.pack("III", w, h, c))
-                f.write(frame_np.astype(np.float32).tobytes())
+            pass
+        except Exception as e:
+            logger.warning(f"OpenEXR write failed: {e}")
 
-    def _create_clip_via_gateway(
-        self, mgr, hostname, dest_node_id, clip_name,
-        file_paths, width, height, fps,
-    ) -> str:
-        """
-        Create a clip in Flame using the Gateway server workaround.
+        # Try OpenImageIO
+        try:
+            import OpenImageIO as oiio
 
-        This reads each temp file through the Gateway server (which decodes
-        the format to raw RGB) and then writes the buffer to an IFFFS clip.
-        """
-        from adsk.libwiretapPythonClientAPI import (
-            WireTapNodeHandle,
-            WireTapClipFormat,
-            WireTapStr,
+            h, w, c = frame_f32.shape
+            spec = oiio.ImageSpec(w, h, c, oiio.FLOAT)
+            if colour_space:
+                spec.attribute("oiio:ColorSpace", colour_space)
+
+            out = oiio.ImageOutput.create(path)
+            if out:
+                out.open(path, spec)
+                out.write_image(frame_f32)
+                out.close()
+                return True
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"OpenImageIO write failed: {e}")
+
+        # Fallback: save as 16-bit PNG (not ideal but universally supported)
+        try:
+            from PIL import Image
+
+            frame_u16 = (frame_f32 * 65535).astype(np.uint16)
+            png_path = path.replace(".exr", ".png")
+            img = Image.fromarray(frame_u16)
+            img.save(png_path)
+            logger.info(f"Saved as PNG fallback: {png_path}")
+            return True
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"PNG fallback failed: {e}")
+
+        logger.error(
+            f"No image writer available (tried OpenEXR, OpenImageIO, PIL). "
+            f"Install one of: OpenEXR, OpenImageIO, Pillow"
         )
-
-        # Create the destination clip — use the connection manager's probe
-        # logic to find the right WireTapServerId constructor signature.
-        server_handle = mgr._get_server_handle(hostname, "IFFFS")
-        parent_handle = WireTapNodeHandle(server_handle, dest_node_id)
-
-        clip_format = WireTapClipFormat(
-            width, height,
-            3 * 16,  # bits per pixel (16-bit per channel)
-            3,        # num channels
-            fps,      # frame rate
-            1,        # pixel ratio
-            getattr(
-                WireTapClipFormat, "SCAN_FORMAT_PROGRESSIVE",
-                getattr(
-                    getattr(WireTapClipFormat, "ScanFormat", None),
-                    "SCAN_FORMAT_PROGRESSIVE", 0,
-                ),
-            ),
-            WireTapClipFormat.FORMAT_RGB(),
-        )
-
-        new_clip = WireTapNodeHandle()
-        if not parent_handle.createClipNode(
-            clip_name, clip_format, "CLIP", new_clip
-        ):
-            raise RuntimeError(
-                f"Failed to create clip: {parent_handle.lastError()}"
-            )
-
-        if not new_clip.setNumFrames(len(file_paths)):
-            raise RuntimeError(
-                f"Failed to set frame count: {new_clip.lastError()}"
-            )
-
-        # Read each file through Gateway and write to IFFFS
-        gateway_handle = mgr._get_server_handle(hostname, "Gateway")
-
-        dest_fmt = WireTapClipFormat()
-        if not new_clip.getClipFormat(dest_fmt):
-            raise RuntimeError(
-                f"Failed to get dest format: {new_clip.lastError()}"
-            )
-
-        for frame_num, file_path in enumerate(file_paths):
-            # Read via Gateway
-            gw_node = WireTapNodeHandle(
-                gateway_handle, file_path + "@CLIP"
-            )
-            gw_fmt = WireTapClipFormat()
-            if not gw_node.getClipFormat(gw_fmt):
-                logger.warning(
-                    f"Gateway read failed for {file_path}: {gw_node.lastError()}"
-                )
-                continue
-
-            buff = "\0" * gw_fmt.frameBufferSize()
-            if not gw_node.readFrame(0, buff, gw_fmt.frameBufferSize()):
-                logger.warning(f"Failed to read frame from gateway: {gw_node.lastError()}")
-                continue
-
-            # Write to IFFFS clip
-            if not new_clip.writeFrame(
-                frame_num, buff, dest_fmt.frameBufferSize()
-            ):
-                logger.warning(
-                    f"Failed to write frame {frame_num}: {new_clip.lastError()}"
-                )
-
-        result_id = WireTapStr()
-        new_clip.getNodeId(result_id)
-        logger.info(f"Created clip: {str(result_id)}")
-        return str(result_id)
+        return False
