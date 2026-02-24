@@ -1,8 +1,12 @@
 """
 OCIO Colour Space Transform Node
 
-Applies OpenColorIO transforms to ComfyUI IMAGE tensors using
-Flame's bundled OCIO config or a user-specified config file.
+Applies OpenColorIO transforms to ComfyUI IMAGE tensors.
+
+Config resolution (three tiers):
+1. Auto-detect: Flame's local OCIO config at /opt/Autodesk/colour_mgmt/
+2. Fallback: Bundled ACES studio config shipped with this node pack
+3. User override: Manually select a config from the dropdown
 """
 
 import os
@@ -13,6 +17,8 @@ import torch
 from typing import Optional, List, Tuple
 
 logger = logging.getLogger("ComfyUI-WiretapBrowser")
+
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ---------------------------------------------------------------------------
 # PyOpenColorIO import
@@ -37,12 +43,12 @@ except ImportError as e:
 # OCIO config discovery (follows projekt-forge conventions)
 # ---------------------------------------------------------------------------
 
-def _find_ocio_configs() -> List[Tuple[str, str]]:
-    """Discover all Flame OCIO config files.
+def _find_flame_configs() -> List[Tuple[str, str]]:
+    """Discover Flame OCIO config files on the local filesystem.
 
     Scans /opt/Autodesk/colour_mgmt/configs/ for config.ocio files,
-    excluding flame_internal_use directories (following projekt-forge
-    conventions). Returns list of (path, name) tuples sorted newest first.
+    excluding flame_internal_use directories (per projekt-forge).
+    Returns list of (path, display_name) tuples sorted newest first.
     """
     base_dir = "/opt/Autodesk/colour_mgmt/configs"
     configs = []
@@ -51,7 +57,6 @@ def _find_ocio_configs() -> List[Tuple[str, str]]:
         return configs
 
     for root, dirs, files in os.walk(base_dir):
-        # Skip internal-only configs (not user-facing)
         if "flame_internal_use" in root:
             continue
         if "config.ocio" in files:
@@ -59,8 +64,24 @@ def _find_ocio_configs() -> List[Tuple[str, str]]:
             name = _read_ocio_name(config_path, os.path.basename(root))
             configs.append((config_path, name))
 
-    # Sort by path descending so newest versioned configs come first
     configs.sort(key=lambda x: x[0], reverse=True)
+    return configs
+
+
+def _find_bundled_configs() -> List[Tuple[str, str]]:
+    """Find OCIO configs shipped with this node pack."""
+    configs_dir = os.path.join(_THIS_DIR, "ocio_configs")
+    configs = []
+
+    if not os.path.isdir(configs_dir):
+        return configs
+
+    for entry in sorted(os.listdir(configs_dir), reverse=True):
+        config_path = os.path.join(configs_dir, entry, "config.ocio")
+        if os.path.isfile(config_path):
+            name = _read_ocio_name(config_path, entry)
+            configs.append((config_path, f"{name} (bundled)"))
+
     return configs
 
 
@@ -78,7 +99,6 @@ def _read_ocio_name(config_path: str, fallback: str) -> str:
                     desc = line[12:].strip().strip("'\"")
                     if desc:
                         return desc
-                # Stop after the header section
                 if line.startswith("roles:") or line.startswith("displays:"):
                     break
     except Exception:
@@ -86,72 +106,108 @@ def _read_ocio_name(config_path: str, fallback: str) -> str:
     return fallback
 
 
-def _find_ocio_config() -> Optional[str]:
-    """Auto-discover the best Flame OCIO config file.
+# ---------------------------------------------------------------------------
+# Build available configs and colour space lists at import time
+# ---------------------------------------------------------------------------
 
-    Search order:
+def _discover_all_configs() -> List[Tuple[str, str]]:
+    """Build the ordered list of available OCIO configs.
+
+    Priority:
     1. $OCIO environment variable
-    2. Flame versioned configs (newest first, preferring aces2.0)
-    3. Any other config.ocio under colour_mgmt/configs/
+    2. Local Flame configs (auto-detected)
+    3. Bundled configs shipped with this node pack
     """
-    # 1. Environment variable
+    configs = []
+
+    # 1. $OCIO environment variable
     env_path = os.environ.get("OCIO", "")
     if env_path and os.path.isfile(env_path):
-        return env_path
+        name = _read_ocio_name(env_path, "Environment ($OCIO)")
+        configs.append((env_path, name))
 
-    # 2. Discover from Flame's colour_mgmt directory
-    configs = _find_ocio_configs()
-    if configs:
-        # Prefer ACES 2.0 configs
-        for path, name in configs:
-            if "aces2" in name.lower() or "aces2" in path.lower():
-                return path
-        # Fall back to first available
-        return configs[0][0]
+    # 2. Local Flame configs
+    configs.extend(_find_flame_configs())
 
-    return None
+    # 3. Bundled configs
+    configs.extend(_find_bundled_configs())
+
+    return configs
 
 
-# ---------------------------------------------------------------------------
-# Build colour space list from discovered config at import time
-# ---------------------------------------------------------------------------
+def _resolve_best_config(configs: List[Tuple[str, str]]) -> Optional[str]:
+    """Pick the best config from the discovered list."""
+    if not configs:
+        return None
 
-_default_config_path = _find_ocio_config()
-_colour_space_names: List[str] = []
+    # Prefer ACES 2.0 configs
+    for path, name in configs:
+        if "aces2" in name.lower() or "aces2" in path.lower():
+            return path
 
-if _ocio_available and _default_config_path:
+    # Fall back to first available
+    return configs[0][0]
+
+
+def _load_colour_spaces(config_path: str) -> List[str]:
+    """Load colour space names from an OCIO config file."""
+    if not _ocio_available or not config_path:
+        return []
     try:
-        _cfg = ocio.Config.CreateFromFile(_default_config_path)
-        _colour_space_names = [cs.getName() for cs in _cfg.getColorSpaces()]
-        logger.info(
-            f"OCIO config loaded: {_default_config_path} "
-            f"({len(_colour_space_names)} colour spaces)"
-        )
-        del _cfg
+        cfg = ocio.Config.CreateFromFile(config_path)
+        return [cs.getName() for cs in cfg.getColorSpaces()]
     except Exception as e:
-        logger.warning(f"Failed to load OCIO config for colour space list: {e}")
+        logger.warning(f"Failed to load colour spaces from {config_path}: {e}")
+        return []
+
+
+# Discover configs and build dropdown lists
+_all_configs = _discover_all_configs()
+_default_config_path = _resolve_best_config(_all_configs)
+
+# Config dropdown: "Auto" + discovered config display names
+_config_choices = ["Auto (best available)"]
+_config_path_map = {"Auto (best available)": None}  # None = use _default_config_path
+for path, name in _all_configs:
+    _config_choices.append(name)
+    _config_path_map[name] = path
+
+# Colour space dropdown from best config
+_colour_space_names = _load_colour_spaces(_default_config_path) if _default_config_path else []
+
+if _default_config_path:
+    logger.info(
+        f"OCIO default config: {_default_config_path} "
+        f"({len(_colour_space_names)} colour spaces, "
+        f"{len(_all_configs)} configs available)"
+    )
 
 if not _colour_space_names:
-    # Fallback list of common colour spaces
     _colour_space_names = [
-        "sRGB - Display",
-        "Rec.1886 Rec.709 - Display",
         "ACEScg",
         "ACES2065-1",
         "Linear Rec.709 (sRGB)",
+        "sRGB - Display",
+        "Rec.1886 Rec.709 - Display",
         "Raw",
     ]
 
+
+# ---------------------------------------------------------------------------
+# Node
+# ---------------------------------------------------------------------------
 
 class WiretapOCIOTransform:
     """
     Apply an OpenColorIO colour space transform to IMAGE tensors.
 
-    Converts frames from the source colour space (as reported by the
-    Wiretap clip) to a target colour space using Flame's bundled OCIO
-    config or a user-specified config.
+    Config resolution (three tiers):
+    1. Auto-detect local Flame OCIO config
+    2. Fall back to bundled ACES studio config
+    3. User selects a specific config from the dropdown
 
-    If PyOpenColorIO is not available, frames pass through unchanged.
+    Source colour space can be wired from the Loader/Browser node
+    or manually selected from the dropdown.
     """
 
     CATEGORY = "Wiretap/Flame"
@@ -165,14 +221,17 @@ class WiretapOCIOTransform:
         return {
             "required": {
                 "images": ("IMAGE",),
-                "source_colour_space": ("STRING", {
-                    "default": "",
-                    "multiline": False,
+                "source_colour_space": (_colour_space_names, {
+                    "default": _colour_space_names[0],
                     "forceInput": True,
-                    "description": "Source colour space (from Wiretap clip)",
                 }),
                 "target_colour_space": (_colour_space_names, {
                     "default": _colour_space_names[0],
+                }),
+            },
+            "optional": {
+                "ocio_config": (_config_choices, {
+                    "default": _config_choices[0],
                 }),
             },
         }
@@ -182,6 +241,7 @@ class WiretapOCIOTransform:
         images: torch.Tensor,
         source_colour_space: str,
         target_colour_space: str,
+        ocio_config: str = "Auto (best available)",
     ):
         if not _ocio_available:
             logger.warning(
@@ -196,22 +256,15 @@ class WiretapOCIOTransform:
             return (images, target_colour_space)
 
         if source_colour_space == target_colour_space:
-            logger.debug(
-                f"Source and target are the same ({source_colour_space}) "
-                f"— no transform needed"
-            )
             return (images, target_colour_space)
 
-        # Resolve OCIO config (auto-discovered at import, or $OCIO env var)
-        config_path = _default_config_path
+        # Resolve config path from dropdown selection
+        config_path = _config_path_map.get(ocio_config)
+        if config_path is None:
+            config_path = _default_config_path
         if not config_path:
-            logger.error(
-                "No OCIO config found. Set $OCIO or provide ocio_config path. "
-                "Searched /opt/Autodesk/colour_mgmt/configs/"
-            )
+            logger.error("No OCIO config available")
             return (images, source_colour_space)
-
-        logger.info(f"Using OCIO config: {config_path}")
 
         try:
             cfg = ocio.Config.CreateFromFile(config_path)
@@ -219,23 +272,23 @@ class WiretapOCIOTransform:
             logger.error(f"Failed to load OCIO config {config_path}: {e}")
             return (images, source_colour_space)
 
-        # Validate colour space names exist in the config
-        available = [cs.getName() for cs in cfg.getColorSpaces()]
+        # Validate colour space names
+        available = set(cs.getName() for cs in cfg.getColorSpaces())
         if source_colour_space not in available:
             logger.error(
                 f"Source colour space '{source_colour_space}' not found "
-                f"in OCIO config. Available: {available[:20]}..."
+                f"in {os.path.basename(os.path.dirname(config_path))} config"
             )
             return (images, source_colour_space)
 
         if target_colour_space not in available:
             logger.error(
                 f"Target colour space '{target_colour_space}' not found "
-                f"in OCIO config. Available: {available[:20]}..."
+                f"in {os.path.basename(os.path.dirname(config_path))} config"
             )
             return (images, source_colour_space)
 
-        # Build the processor
+        # Build processor
         try:
             processor = cfg.getProcessor(
                 source_colour_space, target_colour_space
@@ -243,27 +296,22 @@ class WiretapOCIOTransform:
             cpu = processor.getDefaultCPUProcessor()
         except Exception as e:
             logger.error(
-                f"Failed to create OCIO processor "
+                f"OCIO processor failed "
                 f"({source_colour_space} → {target_colour_space}): {e}"
             )
             return (images, source_colour_space)
 
         logger.info(
-            f"OCIO transform: {source_colour_space} → {target_colour_space} "
-            f"(config: {os.path.basename(config_path)})"
+            f"OCIO: {source_colour_space} → {target_colour_space} "
+            f"({os.path.basename(os.path.dirname(config_path))})"
         )
 
-        # Apply transform to each frame in the batch
-        # ComfyUI IMAGE: (B, H, W, 3) float32
+        # Apply transform to each frame
         result_frames = []
         for i in range(images.shape[0]):
-            frame = images[i].cpu().numpy().copy()  # (H, W, 3) float32
-            h, w, c = frame.shape
-
-            # OCIO expects (data, width, height, numChannels) — all positional
-            img = ocio.PackedImageDesc(frame, w, h, 3)
+            frame = images[i].cpu().numpy().copy()
+            img = ocio.PackedImageDesc(frame, frame.shape[1], frame.shape[0], 3)
             cpu.apply(img)
-
             result_frames.append(torch.from_numpy(frame))
 
         result = torch.stack(result_frames, dim=0)
