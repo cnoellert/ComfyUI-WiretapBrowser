@@ -7,6 +7,7 @@ and provides methods for browsing the node hierarchy.
 import os
 import sys
 import logging
+import numpy as np
 from typing import Optional, List, Dict, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
@@ -564,6 +565,26 @@ class WiretapConnectionManager:
         if raw_bytes is None:
             return None
 
+        # If the data came from the direct-file-read fallback, it's
+        # already decoded as float32 RGB.  Detect this by checking if
+        # the buffer size matches w*h*3*4 (float32) but doesn't match
+        # the expected Wiretap buffer size.
+        w = format_info["width"]
+        h = format_info["height"]
+        float32_rgb_size = w * h * 3 * 4
+        if (
+            len(raw_bytes) == float32_rgb_size
+            and len(raw_bytes) != format_info["frame_buffer_size"]
+        ):
+            logger.info("Frame data is pre-decoded float32 RGB (direct file read)")
+            format_info = dict(format_info)  # copy before mutating
+            format_info["bit_depth"] = 32
+            format_info["bits_per_pixel"] = 96
+            format_info["num_channels"] = 3
+            format_info["frame_buffer_size"] = float32_rgb_size
+            format_info["format_tag"] = "rgb"
+            format_info["_direct_read"] = True  # already top-down
+
         return (raw_bytes, format_info)
 
     def _read_frame_via_cli(
@@ -573,8 +594,14 @@ class WiretapConnectionManager:
         frame_number: int,
         server_type: str,
     ) -> Optional[bytes]:
-        """Read a frame using the wiretap_rw_frame CLI tool."""
+        """Read a frame using the wiretap_rw_frame CLI tool.
+
+        If the Wiretap read fails with an I/O error referencing a file path
+        (common with soft-imported clips), falls back to reading the file
+        directly via OpenImageIO/OpenEXR if it's accessible locally.
+        """
         import tempfile
+        import re
 
         tool = _find_wiretap_tool("wiretap_rw_frame")
         if not tool:
@@ -599,28 +626,521 @@ class WiretapConnectionManager:
                 candidates = [
                     f for f in os.listdir(tmpdir) if f.startswith("frame")
                 ]
-                if not candidates:
-                    logger.error(
-                        f"wiretap_rw_frame produced no output: "
-                        f"{result.stdout} {result.stderr}"
-                    )
-                    return None
 
-                raw_file = os.path.join(tmpdir, candidates[0])
-                data = open(raw_file, "rb").read()
-                if not data:
-                    logger.error(
-                        f"wiretap_rw_frame wrote empty file for frame "
-                        f"{frame_number}: {result.stdout} {result.stderr}"
+                has_data = False
+                if candidates:
+                    raw_file = os.path.join(tmpdir, candidates[0])
+                    data = open(raw_file, "rb").read()
+                    if data:
+                        has_data = True
+
+                if has_data:
+                    magic_hex = data[:8].hex()
+                    logger.info(
+                        f"CLI frame read: file={candidates[0]} "
+                        f"size={len(data)} magic={magic_hex}"
                     )
-                    return None
-                return data
+                    return data
+
+                # Wiretap read failed — check for I/O error with file path
+                combined_output = f"{result.stdout} {result.stderr}"
+                logger.warning(
+                    f"wiretap_rw_frame failed for frame {frame_number}: "
+                    f"{combined_output.strip()}"
+                )
+
+                # Try to extract the source file path from the error
+                # Format: "Unable to read frame N: /path/to/file.ext [I/O error]"
+                match = re.search(
+                    r"Unable to read frame \d+:\s*(/\S+\.(?:exr|dpx|tif|tiff|png|jpg|sgi))",
+                    combined_output,
+                    re.IGNORECASE,
+                )
+                if match:
+                    source_path = match.group(1)
+                    direct_data = self._read_file_direct(source_path)
+                    if direct_data is not None:
+                        return direct_data
+
+                return None
+
             except subprocess.TimeoutExpired:
                 logger.error(f"wiretap_rw_frame timed out for frame {frame_number}")
                 return None
             except Exception as e:
                 logger.error(f"wiretap_rw_frame failed: {e}")
                 return None
+
+    @staticmethod
+    def _read_file_direct(file_path: str) -> Optional[bytes]:
+        """Read an image file directly from disk, returning float32 RGB bytes.
+
+        Used as a fallback when the Wiretap server can't access
+        soft-imported media but the file is accessible locally
+        (e.g. on a shared network mount).
+        """
+        if not os.path.isfile(file_path):
+            logger.debug(f"Direct read: file not found locally: {file_path}")
+            return None
+
+        logger.info(f"Direct file read fallback: {file_path}")
+
+        # Try OpenImageIO
+        try:
+            import OpenImageIO as oiio
+            inp = oiio.ImageInput.open(file_path)
+            if inp:
+                spec = inp.spec()
+                pixels = np.zeros(
+                    (spec.height, spec.width, min(spec.nchannels, 3)),
+                    dtype=np.float32,
+                )
+                inp.read_image(0, 0, 0, 3, oiio.FLOAT, pixels)
+                inp.close()
+                # Pad to 3 channels if needed
+                if pixels.shape[2] < 3:
+                    pad = np.zeros(
+                        (spec.height, spec.width, 3 - pixels.shape[2]),
+                        dtype=np.float32,
+                    )
+                    pixels = np.concatenate([pixels, pad], axis=2)
+                logger.info(
+                    f"Direct read via OIIO: {spec.width}x{spec.height} "
+                    f"({spec.nchannels}ch)"
+                )
+                return pixels.tobytes()
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"OIIO direct read failed: {e}")
+
+        # Try OpenEXR (EXR only)
+        if file_path.lower().endswith(".exr"):
+            try:
+                import OpenEXR
+                import Imath
+                exr = OpenEXR.InputFile(file_path)
+                header = exr.header()
+                dw = header["dataWindow"]
+                w = dw.max.x - dw.min.x + 1
+                h = dw.max.y - dw.min.y + 1
+                pt = Imath.PixelType(Imath.PixelType.FLOAT)
+                r = np.frombuffer(exr.channel("R", pt), dtype=np.float32).reshape(h, w)
+                g = np.frombuffer(exr.channel("G", pt), dtype=np.float32).reshape(h, w)
+                b = np.frombuffer(exr.channel("B", pt), dtype=np.float32).reshape(h, w)
+                pixels = np.stack([r, g, b], axis=-1)
+                logger.info(f"Direct read via OpenEXR: {w}x{h}")
+                return pixels.tobytes()
+            except ImportError:
+                pass
+            except Exception as e:
+                logger.warning(f"OpenEXR direct read failed: {e}")
+
+        logger.error(
+            f"Direct file read failed — no image library available. "
+            f"Install OpenImageIO or OpenEXR."
+        )
+        return None
+
+    # -----------------------------------------------------------------------
+    # Write operations
+    # -----------------------------------------------------------------------
+
+    def build_clip_format(
+        self,
+        width: int,
+        height: int,
+        bit_depth: int = 32,
+        fps: float = 24.0,
+    ):
+        """
+        Construct a WireTapClipFormat for creating new clips.
+
+        Defaults to 32-bit float RGB which matches ComfyUI's native
+        float32 tensor format and avoids bit-packing complexity.
+
+        Returns:
+            WireTapClipFormat or None if SDK unavailable.
+        """
+        if not _wiretap_available:
+            return None
+
+        fmt = WireTapClipFormat()
+
+        # Try setter methods (SDK version dependent)
+        try:
+            fmt.setWidth(width)
+            fmt.setHeight(height)
+            fmt.setNumChannels(3)
+            fmt.setBitsPerPixel(bit_depth * 3)
+            fmt.setFrameRate(fps)
+
+            # Progressive scan
+            _prog = getattr(
+                WireTapClipFormat, "SCAN_FORMAT_PROGRESSIVE",
+                getattr(
+                    getattr(WireTapClipFormat, "ScanFormat", None),
+                    "SCAN_FORMAT_PROGRESSIVE", 0,
+                ),
+            )
+            fmt.setScanFormat(_prog)
+            fmt.setPixelRatio(1.0)
+
+            logger.info(
+                f"Built clip format: {width}x{height} "
+                f"{bit_depth}-bit {fps}fps"
+            )
+            return fmt
+        except AttributeError as e:
+            logger.error(f"WireTapClipFormat setter not available: {e}")
+            return None
+
+    def read_frame_via_gateway(
+        self,
+        hostname: str,
+        file_path: str,
+    ) -> Optional[Tuple[bytes, Any]]:
+        """
+        Read a file through the Gateway server to get a properly-encoded
+        Wiretap frame buffer.  The Gateway handles all pixel format
+        encoding so we never need to manually pack buffers.
+
+        Args:
+            hostname: Flame workstation hostname.
+            file_path: Absolute path to an image file on disk.
+
+        Returns:
+            Tuple of (raw_buffer_bytes, WireTapClipFormat) or None.
+        """
+        if not _wiretap_available:
+            logger.warning("Wiretap SDK not available — cannot read via Gateway")
+            return None
+
+        self.initialize()
+
+        try:
+            server = self._get_server_handle(hostname, "Gateway")
+        except ConnectionError as e:
+            logger.error(f"Gateway connection failed: {e}")
+            return None
+
+        # Gateway addresses files as "<path>@CLIP"
+        gateway_node_id = f"{file_path}@CLIP"
+        node_handle = WireTapNodeHandle(server, gateway_node_id)
+
+        fmt = WireTapClipFormat()
+        if not node_handle.getClipFormat(fmt):
+            logger.error(
+                f"Gateway getClipFormat failed for {gateway_node_id}: "
+                f"{node_handle.lastError()}"
+            )
+            return None
+
+        buf_size = fmt.frameBufferSize()
+        if buf_size <= 0:
+            logger.error(f"Gateway reports zero buffer size for {file_path}")
+            return None
+
+        # Read frame 0 (single-frame file)
+        # Use CLI tool for the actual read since the Python readFrame has
+        # the same str/bytes issue as IFFFS reads
+        raw_bytes = self._read_frame_via_cli(
+            hostname, gateway_node_id, 0, "Gateway"
+        )
+        if raw_bytes is None:
+            logger.error(f"Gateway frame read failed for {file_path}")
+            return None
+
+        return (raw_bytes, fmt)
+
+    def can_create_node(
+        self,
+        hostname: str,
+        parent_node_id: str,
+        node_type: str = "CLIP",
+        server_type: str = "IFFFS",
+    ) -> bool:
+        """Check if a node type can be created under a parent node."""
+        tool = _find_wiretap_tool("wiretap_can_create_node")
+        if not tool:
+            logger.warning("wiretap_can_create_node not found")
+            return False
+
+        try:
+            result = subprocess.run(
+                [tool, "-h", f"{hostname}:{server_type}",
+                 "-n", parent_node_id, "-t", node_type],
+                capture_output=True, text=True, timeout=10,
+            )
+            can = "can create" in result.stdout and "can NOT" not in result.stdout
+            logger.debug(
+                f"canCreateNode({node_type}) on {parent_node_id}: "
+                f"{'yes' if can else 'no'}"
+            )
+            return can
+        except Exception as e:
+            logger.error(f"wiretap_can_create_node failed: {e}")
+            return False
+
+    def create_clip_node(
+        self,
+        hostname: str,
+        parent_node_id: str,
+        clip_name: str,
+        width: int = 1920,
+        height: int = 1080,
+        bit_depth: int = 10,
+        fps: float = 24.0,
+        num_frames: int = 1,
+        server_type: str = "IFFFS",
+    ) -> Optional[str]:
+        """
+        Create a new clip node via the wiretap_create_clip CLI tool.
+
+        Uses the CLI tool instead of the Python SDK to avoid Boost.Python
+        issues and to handle format setup + frame allocation in one step.
+
+        Args:
+            hostname: Flame workstation hostname.
+            parent_node_id: Node ID of the parent reel or library.
+            clip_name: Display name for the new clip.
+            width: Frame width.
+            height: Frame height.
+            bit_depth: Bits per channel (8, 10, 12, 16, 32).
+            fps: Frame rate.
+            num_frames: Number of frames to allocate.
+            server_type: Server type (normally "IFFFS").
+
+        Returns:
+            The new clip's node ID, or None on failure.
+        """
+        tool = _find_wiretap_tool("wiretap_create_clip")
+        if not tool:
+            logger.error("wiretap_create_clip not found")
+            return None
+
+        bpp = bit_depth * 3
+        # Map bit_depth to format tag
+        if bit_depth == 32:
+            fmt_tag = "rgb_float_le"
+        else:
+            fmt_tag = "rgb"
+
+        cmd = [
+            tool,
+            "-h", f"{hostname}:{server_type}",
+            "-n", parent_node_id,
+            "-d", clip_name,
+            "-x", str(width),
+            "-y", str(height),
+            "-b", str(bpp),
+            "-r", str(fps),
+            "-N", str(num_frames),
+            "-s", "progressive",
+            "-f", fmt_tag,
+        ]
+        logger.info(
+            f"Creating clip '{clip_name}' {width}x{height} "
+            f"{bit_depth}-bit {fps}fps ({num_frames} frames)"
+        )
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=30,
+            )
+            combined = f"{result.stdout} {result.stderr}".strip()
+
+            # Parse the new node ID from output like:
+            # "Created clip node '/projects/.../node_id'."
+            import re
+            match = re.search(r"Created clip node '([^']+)'", combined)
+            if match:
+                new_node_id = match.group(1)
+                logger.info(f"Created clip '{clip_name}' at {new_node_id}")
+                return new_node_id
+
+            logger.error(f"wiretap_create_clip failed: {combined}")
+            return None
+        except subprocess.TimeoutExpired:
+            logger.error("wiretap_create_clip timed out")
+            return None
+        except Exception as e:
+            logger.error(f"wiretap_create_clip failed: {e}")
+            return None
+
+    def create_node(
+        self,
+        hostname: str,
+        parent_node_id: str,
+        node_type: str,
+        display_name: str,
+        server_type: str = "IFFFS",
+    ) -> Optional[str]:
+        """Create a generic node (LIBRARY, REEL, etc.) via CLI tool."""
+        tool = _find_wiretap_tool("wiretap_create_node")
+        if not tool:
+            logger.error("wiretap_create_node not found")
+            return None
+
+        try:
+            result = subprocess.run(
+                [tool, "-h", f"{hostname}:{server_type}",
+                 "-n", parent_node_id, "-t", node_type, "-d", display_name],
+                capture_output=True, text=True, timeout=15,
+            )
+            combined = f"{result.stdout} {result.stderr}".strip()
+
+            import re
+            match = re.search(r"Created node '([^']+)'", combined)
+            if match:
+                new_node_id = match.group(1)
+                logger.info(
+                    f"Created {node_type} '{display_name}' at {new_node_id}"
+                )
+                return new_node_id
+
+            logger.error(f"wiretap_create_node failed: {combined}")
+            return None
+        except Exception as e:
+            logger.error(f"wiretap_create_node failed: {e}")
+            return None
+
+    def set_num_frames(
+        self,
+        hostname: str,
+        node_id: str,
+        num_frames: int,
+        server_type: str = "IFFFS",
+    ) -> bool:
+        """Set the number of frames on a clip node via CLI tool."""
+        tool = _find_wiretap_tool("wiretap_set_num_frames")
+        if not tool:
+            logger.error("wiretap_set_num_frames not found")
+            return False
+
+        try:
+            result = subprocess.run(
+                [tool, "-h", f"{hostname}:{server_type}",
+                 "-n", node_id, "-N", str(num_frames)],
+                capture_output=True, text=True, timeout=15,
+            )
+            combined = f"{result.stdout} {result.stderr}".strip()
+            if result.returncode != 0:
+                logger.error(
+                    f"wiretap_set_num_frames failed: {combined}"
+                )
+                return False
+            logger.info(f"Set {node_id} to {num_frames} frames")
+            return True
+        except Exception as e:
+            logger.error(f"wiretap_set_num_frames failed: {e}")
+            return False
+
+    def write_frame(
+        self,
+        hostname: str,
+        node_id: str,
+        frame_number: int,
+        buffer: bytes,
+        buffer_size: int,
+        server_type: str = "IFFFS",
+    ) -> bool:
+        """
+        Write a single frame buffer to a clip node.
+
+        Uses the wiretap_rw_frame CLI tool with -w flag to bypass the
+        Boost.Python bytes/char const* mismatch (same issue as readFrame).
+
+        Args:
+            hostname: Flame workstation hostname.
+            node_id: Clip (or hires sub-node) node ID.
+            frame_number: 0-based frame index.
+            buffer: Raw frame bytes matching the clip's native format.
+            buffer_size: Size of the buffer in bytes.
+            server_type: Server type (normally "IFFFS").
+
+        Returns:
+            True on success, False on failure.
+        """
+        return self._write_frame_via_cli(
+            hostname, node_id, frame_number, buffer, server_type
+        )
+
+    def _write_frame_via_cli(
+        self,
+        hostname: str,
+        node_id: str,
+        frame_number: int,
+        buffer: bytes,
+        server_type: str,
+    ) -> bool:
+        """Write a frame using the wiretap_rw_frame CLI tool with -w flag.
+
+        The CLI tool reads raw frame data from a file and pushes it into
+        the Wiretap clip via the C++ writeFrame call internally, bypassing
+        the Boost.Python str/bytes mismatch.
+
+        File naming convention: the tool expects -f <base> and constructs
+        <base>_<frame_index>.<ext>.  We write raw bytes to match that
+        pattern so the tool finds the file.
+        """
+        import tempfile
+
+        tool = _find_wiretap_tool("wiretap_rw_frame")
+        if not tool:
+            logger.error("wiretap_rw_frame not found — cannot write frame")
+            return False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # The -i flag sets the destination frame index in the clip.
+            # The tool always reads from {base}_0.{ext} (the file index
+            # is always 0, independent of the clip frame index).
+            base_path = os.path.join(tmpdir, "frame")
+            raw_path = os.path.join(tmpdir, "frame_0.")
+            with open(raw_path, "wb") as f:
+                f.write(buffer)
+
+            # Verify the file was written
+            actual_size = os.path.getsize(raw_path)
+            logger.debug(
+                f"Temp file: {raw_path} size={actual_size} "
+                f"exists={os.path.exists(raw_path)}"
+            )
+
+            cmd = [
+                tool,
+                "-h", f"{hostname}:{server_type}",
+                "-n", node_id,
+                "-i", str(frame_number),
+                "-f", base_path,
+                "-w",
+            ]
+            logger.info(
+                f"CLI write frame {frame_number}: "
+                f"node={node_id} buf_size={len(buffer)} "
+                f"file={raw_path}"
+            )
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=60,
+                )
+                combined = f"{result.stdout} {result.stderr}".strip()
+                if result.returncode != 0:
+                    logger.error(
+                        f"wiretap_rw_frame -w failed (rc={result.returncode}): "
+                        f"{combined}"
+                    )
+                    return False
+                if combined:
+                    logger.info(f"wiretap_rw_frame -w output: {combined}")
+                return True
+            except subprocess.TimeoutExpired:
+                logger.error(
+                    f"wiretap_rw_frame -w timed out for frame {frame_number}"
+                )
+                return False
+            except Exception as e:
+                logger.error(f"wiretap_rw_frame -w failed: {e}")
+                return False
 
     # -----------------------------------------------------------------------
     # Mock mode for development without a Flame workstation

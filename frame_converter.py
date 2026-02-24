@@ -21,12 +21,103 @@ from typing import Dict, Any, Optional
 logger = logging.getLogger("ComfyUI-WiretapBrowser")
 
 
+def _detect_image_file(raw_bytes: bytes) -> Optional[str]:
+    """Check if raw_bytes starts with a known image file magic number."""
+    if len(raw_bytes) < 8:
+        return None
+    magic = raw_bytes[:4]
+    # DPX: "SDPX" (big-endian) or "XPDS" (little-endian)
+    if magic in (b"SDPX", b"XPDS"):
+        return "dpx"
+    # OpenEXR magic: 0x762f3101
+    if raw_bytes[:4] == b"\x76\x2f\x31\x01":
+        return "exr"
+    # TIFF: "II" or "MM" followed by 42
+    if raw_bytes[:2] in (b"II", b"MM"):
+        return "tiff"
+    # PNG
+    if raw_bytes[:4] == b"\x89PNG":
+        return "png"
+    return None
+
+
+def _decode_image_file(raw_bytes: bytes, file_format: str) -> Optional[np.ndarray]:
+    """Decode an image file buffer using OpenImageIO or PIL, returning HWC float32."""
+    import tempfile
+    ext = {"dpx": ".dpx", "exr": ".exr", "tiff": ".tif", "png": ".png"}[file_format]
+
+    # Write to temp file so OIIO/PIL can open it
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+        tmp.write(raw_bytes)
+        tmp_path = tmp.name
+
+    try:
+        # Try OpenImageIO first
+        try:
+            import OpenImageIO as oiio
+            inp = oiio.ImageInput.open(tmp_path)
+            if inp:
+                spec = inp.spec()
+                image = np.zeros((spec.height, spec.width, spec.nchannels), dtype=np.float32)
+                inp.read_image(oiio.FLOAT, image)
+                inp.close()
+                logger.info(
+                    f"Decoded {file_format.upper()} via OIIO: "
+                    f"{spec.width}x{spec.height}x{spec.nchannels}"
+                )
+                return image[:, :, :3] if spec.nchannels > 3 else image
+        except ImportError:
+            pass
+
+        # Try OpenEXR for EXR files
+        if file_format == "exr":
+            try:
+                import OpenEXR
+                import Imath
+                exr = OpenEXR.InputFile(tmp_path)
+                header = exr.header()
+                dw = header["dataWindow"]
+                w = dw.max.x - dw.min.x + 1
+                h = dw.max.y - dw.min.y + 1
+                pt = Imath.PixelType(Imath.PixelType.FLOAT)
+                r = np.frombuffer(exr.channel("R", pt), dtype=np.float32).reshape(h, w)
+                g = np.frombuffer(exr.channel("G", pt), dtype=np.float32).reshape(h, w)
+                b = np.frombuffer(exr.channel("B", pt), dtype=np.float32).reshape(h, w)
+                image = np.stack([r, g, b], axis=-1)
+                logger.info(f"Decoded EXR via OpenEXR: {w}x{h}")
+                return image
+            except ImportError:
+                pass
+
+        # PIL fallback
+        try:
+            from PIL import Image
+            img = Image.open(tmp_path).convert("RGB")
+            image = np.array(img).astype(np.float32) / 255.0
+            logger.info(f"Decoded {file_format.upper()} via PIL: {img.size}")
+            return image
+        except ImportError:
+            pass
+
+        logger.error(
+            f"Cannot decode {file_format.upper()} file — "
+            f"install OpenImageIO, OpenEXR, or Pillow"
+        )
+        return None
+    finally:
+        import os
+        os.unlink(tmp_path)
+
+
 def raw_rgb_to_tensor(
     raw_bytes: bytes,
     format_info: Dict[str, Any],
 ) -> torch.Tensor:
     """
     Convert a Wiretap raw RGB frame buffer to a ComfyUI IMAGE tensor.
+
+    If the buffer is actually an image file (DPX, EXR, etc.) written by
+    wiretap_rw_frame, it will be detected and decoded via OIIO/OpenEXR.
 
     Args:
         raw_bytes: Raw frame bytes from WireTapNodeHandle.readFrame()
@@ -45,6 +136,25 @@ def raw_rgb_to_tensor(
         f"Decoding frame: {width}x{height} bit_depth={bit_depth} "
         f"tag={format_tag}"
     )
+
+    # Check if the CLI tool wrote an image file (DPX, EXR, etc.)
+    # instead of raw RGB bytes
+    file_format = _detect_image_file(raw_bytes)
+    if file_format:
+        logger.info(
+            f"Detected {file_format.upper()} image file in frame buffer "
+            f"— decoding via image library"
+        )
+        image = _decode_image_file(raw_bytes, file_format)
+        if image is not None:
+            image = np.clip(image, 0.0, 1.0)
+            tensor = torch.from_numpy(image.astype(np.float32))
+            if tensor.ndim == 3:
+                tensor = tensor.unsqueeze(0)
+            return tensor
+        logger.warning(
+            f"Image file decode failed, falling back to raw RGB decode"
+        )
 
     arr = np.frombuffer(raw_bytes, dtype=np.uint8)
 
@@ -71,8 +181,10 @@ def raw_rgb_to_tensor(
         )
         image = _decode_8bit(arr, width, height)
 
-    # Wiretap stores frames bottom-to-top (like BMP/OpenGL); flip to top-down.
-    image = np.flipud(image)
+    # Wiretap raw buffers are bottom-to-top (like BMP/OpenGL); flip to top-down.
+    # Direct file reads are already top-down — skip the flip.
+    if not format_info.get("_direct_read", False):
+        image = np.flipud(image)
 
     # Ensure correct shape: (H, W, 3) float32 in [0, 1]
     if image.ndim == 2:
@@ -128,48 +240,47 @@ def _decode_8bit_fast(arr: np.ndarray, width: int, height: int) -> np.ndarray:
 
 def _decode_10bit(arr: np.ndarray, width: int, height: int) -> np.ndarray:
     """
-    Decode 10-bit RGB: 4 bytes (32 bits) per pixel, filled.
-    Layout per 32-bit word: [2 pad bits][10-bit B][10-bit G][10-bit R]
-    MSB first: bits 31-30 = pad, 29-20 = B, 19-10 = G, 9-0 = R
+    Decode 10-bit RGB: 4 bytes (32 bits) per pixel, big-endian.
+    DPX method A layout per 32-bit word (MSB → LSB):
+        [10-bit R][10-bit G][10-bit B][2 pad bits]
+        bits 31-22 = R, bits 21-12 = G, bits 11-2 = B, bits 1-0 = pad
     """
-    bytes_per_pixel = 4
-    bits_per_line = width * bytes_per_pixel * 8
-    padding_bits = (32 - (bits_per_line % 32)) % 32
-    bytes_per_line_padded = (bits_per_line + padding_bits) // 8
-
-    # Try fast path: interpret as uint32 array
+    # Fast path: interpret as big-endian uint32 array
     try:
-        # Each pixel is a 32-bit word
         total_pixels = height * width
         if len(arr) >= total_pixels * 4:
-            words = np.frombuffer(arr[:total_pixels * 4].tobytes(), dtype=np.uint32)
+            words = np.frombuffer(
+                arr[:total_pixels * 4].tobytes(), dtype=">u4"
+            )
             words = words.reshape(height, width)
 
-            r = (words & 0x3FF).astype(np.float32) / 1023.0
-            g = ((words >> 10) & 0x3FF).astype(np.float32) / 1023.0
-            b = ((words >> 20) & 0x3FF).astype(np.float32) / 1023.0
+            r = ((words >> 22) & 0x3FF).astype(np.float32) / 1023.0
+            g = ((words >> 12) & 0x3FF).astype(np.float32) / 1023.0
+            b = ((words >> 2) & 0x3FF).astype(np.float32) / 1023.0
 
             image = np.stack([r, g, b], axis=-1)
             return image
     except Exception as e:
         logger.warning(f"Fast 10-bit decode failed, using slow path: {e}")
 
-    # Slow fallback
+    # Slow fallback (big-endian word construction)
+    bytes_per_pixel = 4
+    bytes_per_line = width * bytes_per_pixel
     image = np.zeros((height, width, 3), dtype=np.float32)
     for y in range(height):
-        line_start = y * bytes_per_line_padded
+        line_start = y * bytes_per_line
         for x in range(width):
             px_start = line_start + x * 4
             if px_start + 3 < len(arr):
                 word = (
-                    arr[px_start]
-                    | (arr[px_start + 1] << 8)
-                    | (arr[px_start + 2] << 16)
-                    | (arr[px_start + 3] << 24)
+                    (arr[px_start] << 24)
+                    | (arr[px_start + 1] << 16)
+                    | (arr[px_start + 2] << 8)
+                    | arr[px_start + 3]
                 )
-                image[y, x, 0] = (word & 0x3FF) / 1023.0
-                image[y, x, 1] = ((word >> 10) & 0x3FF) / 1023.0
-                image[y, x, 2] = ((word >> 20) & 0x3FF) / 1023.0
+                image[y, x, 0] = ((word >> 22) & 0x3FF) / 1023.0
+                image[y, x, 1] = ((word >> 12) & 0x3FF) / 1023.0
+                image[y, x, 2] = ((word >> 2) & 0x3FF) / 1023.0
 
     return image
 

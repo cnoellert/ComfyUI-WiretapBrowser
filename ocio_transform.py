@@ -31,6 +31,8 @@ ocio = None
 try:
     import PyOpenColorIO as ocio
     _ocio_available = True
+    # Suppress noisy warnings about unknown keys (e.g. interop_id in newer configs)
+    ocio.SetLoggingLevel(ocio.LOGGING_LEVEL_NONE)
     logger.info(f"PyOpenColorIO loaded: {ocio.__version__}")
 except ImportError as e:
     _ocio_import_error = str(e)
@@ -223,13 +225,25 @@ class WiretapOCIOTransform:
                 "images": ("IMAGE",),
                 "source_colour_space": (_colour_space_names, {
                     "default": _colour_space_names[0],
-                    "forceInput": True,
                 }),
                 "target_colour_space": (_colour_space_names, {
                     "default": _colour_space_names[0],
                 }),
             },
             "optional": {
+                "source_override": ("STRING", {
+                    "forceInput": True,
+                    "description": (
+                        "Wire from Loader/Metadata colour_space output. "
+                        "Overrides the source dropdown when connected."
+                    ),
+                }),
+                "target_override": ("STRING", {
+                    "forceInput": True,
+                    "description": (
+                        "Overrides the target dropdown when connected."
+                    ),
+                }),
                 "ocio_config": (_config_choices, {
                     "default": _config_choices[0],
                 }),
@@ -241,8 +255,16 @@ class WiretapOCIOTransform:
         images: torch.Tensor,
         source_colour_space: str,
         target_colour_space: str,
+        source_override: str = "",
+        target_override: str = "",
         ocio_config: str = "Auto (best available)",
     ):
+        # Wire overrides take priority over dropdowns
+        if source_override:
+            source_colour_space = source_override
+        if target_override:
+            target_colour_space = target_override
+
         if not _ocio_available:
             logger.warning(
                 "PyOpenColorIO not available — passing through unchanged"

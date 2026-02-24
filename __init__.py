@@ -33,6 +33,7 @@ if not logger.handlers:
 from .wiretap_browser import WiretapBrowser, WiretapServerInfo
 from .wiretap_loader import WiretapClipLoader, WiretapFrameWriter
 from .ocio_transform import WiretapOCIOTransform
+from .wiretap_metadata import WiretapMetadata
 
 # ---------------------------------------------------------------------------
 # ComfyUI Registration
@@ -44,6 +45,7 @@ NODE_CLASS_MAPPINGS = {
     "WiretapFrameWriter": WiretapFrameWriter,
     "WiretapServerInfo": WiretapServerInfo,
     "WiretapOCIOTransform": WiretapOCIOTransform,
+    "WiretapMetadata": WiretapMetadata,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -52,6 +54,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WiretapFrameWriter": "🔥 Flame Clip Writer",
     "WiretapServerInfo": "🔥 Flame Server Info",
     "WiretapOCIOTransform": "🔥 Flame OCIO Transform",
+    "WiretapMetadata": "🔥 Flame Clip Metadata",
 }
 
 # Tell ComfyUI where to find our frontend JS extensions

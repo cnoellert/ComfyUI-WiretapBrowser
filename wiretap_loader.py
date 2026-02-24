@@ -220,15 +220,19 @@ class WiretapClipLoader:
 
 class WiretapFrameWriter:
     """
-    Write IMAGE tensor frames as an EXR image sequence to disk.
+    Write IMAGE tensor frames back to Flame via Wiretap or to disk as EXR.
 
-    Saves processed frames as 32-bit float EXR files that can be
-    imported into Flame via MediaHub. Direct Wiretap IFFFS writes
-    are blocked while Flame has the project open (database lock),
-    so writing to disk is the reliable approach.
+    Two modes of operation:
 
-    The output_path string can be used to locate the sequence for
-    import into Flame or other applications.
+    1. **Wiretap round-trip** (destination_node_id wired):
+       Saves temp EXR → reads through Gateway server (proper encoding) →
+       createClipNode on IFFFS → writeFrame. Full round-trip back into Flame.
+
+    2. **Disk-only** (no destination wired):
+       Saves EXR sequence to output_directory for manual import via MediaHub.
+
+    The Gateway round-trip avoids manual buffer packing — the Gateway server
+    handles all pixel format encoding when reading the temp EXR back.
     """
 
     CATEGORY = "Wiretap/Flame"
@@ -245,12 +249,15 @@ class WiretapFrameWriter:
                 "output_directory": ("STRING", {
                     "default": "/var/tmp/comfyui_output",
                     "multiline": False,
-                    "description": "Directory to write the EXR sequence into",
+                    "description": (
+                        "Directory for EXR output (disk mode) or temp files "
+                        "(Wiretap mode)"
+                    ),
                 }),
                 "clip_name": ("STRING", {
                     "default": "comfyui_output",
                     "multiline": False,
-                    "description": "Base name for the image sequence",
+                    "description": "Base name for the image sequence / Flame clip",
                 }),
                 "start_frame": ("INT", {
                     "default": 1001,
@@ -258,6 +265,23 @@ class WiretapFrameWriter:
                     "max": 9999999,
                     "step": 1,
                     "description": "Starting frame number for the sequence",
+                }),
+                "hostname": ("STRING", {
+                    "default": "localhost",
+                    "multiline": False,
+                    "description": "Flame workstation hostname",
+                }),
+                "server_type": (["IFFFS", "Gateway"], {
+                    "default": "IFFFS",
+                }),
+                "destination_node_id": ("STRING", {
+                    "default": "",
+                    "multiline": False,
+                    "description": (
+                        "Destination reel/library node ID. "
+                        "Use the Browse Destination button to select. "
+                        "Leave empty for disk-only mode."
+                    ),
                 }),
             },
             "optional": {
@@ -276,23 +300,51 @@ class WiretapFrameWriter:
         output_directory: str,
         clip_name: str,
         start_frame: int,
+        hostname: str,
+        server_type: str,
+        destination_node_id: str,
         colour_space: str = "",
     ):
-        """Save frames as an EXR image sequence to disk."""
+        """Write frames to Flame via Wiretap round-trip or to disk as EXR."""
         import os
+        import tempfile
 
         if not output_directory:
             logger.error("No output_directory provided")
             return ("",)
 
-        # Create the output directory
+        batch_size, h, w, c = images.shape
+        wiretap_mode = bool(destination_node_id and destination_node_id.strip())
+
+        if wiretap_mode:
+            # --- Wiretap round-trip mode ---
+            return self._write_wiretap(
+                images, output_directory, clip_name, start_frame,
+                colour_space, destination_node_id.strip(), hostname,
+                server_type,
+            )
+        else:
+            # --- Disk-only mode (existing behavior) ---
+            return self._write_disk(
+                images, output_directory, clip_name, start_frame, colour_space
+            )
+
+    def _write_disk(
+        self,
+        images: torch.Tensor,
+        output_directory: str,
+        clip_name: str,
+        start_frame: int,
+        colour_space: str,
+    ):
+        """Save frames as an EXR image sequence to disk."""
+        import os
+
         seq_dir = os.path.join(output_directory, clip_name)
         os.makedirs(seq_dir, exist_ok=True)
 
         batch_size, h, w, c = images.shape
-        logger.info(
-            f"Writing {batch_size} frames ({w}x{h}) to {seq_dir}"
-        )
+        logger.info(f"Writing {batch_size} frames ({w}x{h}) to {seq_dir}")
 
         written = 0
         for i in range(batch_size):
@@ -304,39 +356,255 @@ class WiretapFrameWriter:
             if self._save_frame_exr(frame, file_path, colour_space):
                 written += 1
 
-        logger.info(
-            f"Wrote {written}/{batch_size} frames to {seq_dir}"
-        )
-
+        logger.info(f"Wrote {written}/{batch_size} frames to {seq_dir}")
         return (seq_dir,)
+
+    def _write_wiretap(
+        self,
+        images: torch.Tensor,
+        output_directory: str,
+        clip_name: str,
+        start_frame: int,
+        colour_space: str,
+        destination_node_id: str,
+        hostname: str,
+        server_type: str,
+    ):
+        """
+        Write frames into Flame via Wiretap CLI tools.
+
+        All operations use CLI tools (wiretap_create_clip, wiretap_rw_frame)
+        to bypass Boost.Python str/bytes incompatibilities in the Python SDK.
+
+        For existing clips: resolves to hires sub-node and writes directly.
+        For reels/libraries: validates with canCreateNode, then creates clip.
+
+        Falls back to disk-only mode on any Wiretap error.
+        """
+        import os
+
+        mgr = get_connection_manager()
+        batch_size, h, w, c = images.shape
+
+        try:
+            # Detect whether destination is a reel (create new clip)
+            # or an existing clip (write directly into it)
+            children = mgr.get_children(hostname, destination_node_id, server_type)
+            is_clip = any(
+                ch.node_type.value in ("HIRES", "LOWRES")
+                for ch in children
+            )
+
+            if is_clip:
+                # Destination is an existing clip — resolve to hires sub-node
+                hires_id = destination_node_id
+                for ch in children:
+                    if ch.node_type.value == "HIRES":
+                        hires_id = ch.node_id
+                        break
+                target_clip_id = hires_id
+                logger.info(
+                    f"Writing into existing clip: {target_clip_id}"
+                )
+
+                # Query the actual format of the existing clip
+                clip_info = mgr.get_clip_format(
+                    hostname, target_clip_id, server_type
+                )
+                if clip_info:
+                    logger.info(
+                        f"Target clip format: {clip_info.get('width')}x"
+                        f"{clip_info.get('height')} "
+                        f"{clip_info.get('bit_depth')}-bit "
+                        f"buf_size={clip_info.get('frame_buffer_size')}"
+                    )
+            else:
+                # Destination is a reel/library — create a new clip
+                # Validate first
+                if not mgr.can_create_node(
+                    hostname, destination_node_id, "CLIP", server_type
+                ):
+                    logger.warning(
+                        f"Cannot create CLIP under {destination_node_id} "
+                        f"— Wiretap cannot write into a Workspace that "
+                        f"is currently open in Flame. Use a Shared Library "
+                        f"instead. Falling back to disk mode."
+                    )
+                    return self._write_disk(
+                        images, output_directory, clip_name,
+                        start_frame, colour_space,
+                    )
+
+                target_clip_id = mgr.create_clip_node(
+                    hostname, destination_node_id, clip_name,
+                    width=w, height=h, bit_depth=10, fps=24.0,
+                    num_frames=batch_size, server_type=server_type,
+                )
+                if target_clip_id is None:
+                    logger.warning(
+                        f"create_clip_node failed on {destination_node_id} — "
+                        f"falling back to disk mode"
+                    )
+                    return self._write_disk(
+                        images, output_directory, clip_name,
+                        start_frame, colour_space,
+                    )
+
+                # wiretap_create_clip always creates a hires sub-node.
+                # Append /hires directly — get_children can fail on
+                # freshly-created clips ("Entry not found").
+                hires_id = f"{target_clip_id}/hires"
+                logger.info(f"Using hires sub-node: {hires_id}")
+                target_clip_id = hires_id
+
+                # Ensure hires node has frames allocated
+                mgr.set_num_frames(
+                    hostname, target_clip_id, batch_size, server_type
+                )
+
+                # We just created the clip — use known parameters
+                # instead of querying (get_clip_format can fail on
+                # freshly-created nodes).
+                clip_info = {
+                    "width": w,
+                    "height": h,
+                    "bit_depth": 10,
+                    "bits_per_pixel": 30,
+                    "num_channels": 3,
+                    "frame_buffer_size": w * h * 4,  # 10-bit = 4 bytes/pixel
+                }
+                logger.info(
+                    f"Target clip format (from creation params): "
+                    f"{w}x{h} 10-bit"
+                )
+
+            # Write each frame via CLI tool
+            written = 0
+            for i in range(batch_size):
+                frame = images[i].cpu().numpy()
+                raw_bytes = self._encode_frame_for_clip(
+                    frame, clip_info
+                )
+
+                if mgr.write_frame(
+                    hostname, target_clip_id, i,
+                    raw_bytes, len(raw_bytes), server_type,
+                ):
+                    written += 1
+                else:
+                    logger.error(f"writeFrame failed for frame {i}")
+
+            logger.info(
+                f"Wiretap write complete: {written}/{batch_size} frames "
+                f"to clip '{clip_name}' ({target_clip_id})"
+            )
+
+            # Also save to disk as backup
+            self._write_disk(
+                images, output_directory, clip_name,
+                start_frame, colour_space,
+            )
+
+            return (target_clip_id,)
+
+        except Exception as e:
+            logger.error(f"Wiretap write failed: {e} — falling back to disk mode")
+            return self._write_disk(
+                images, output_directory, clip_name,
+                start_frame, colour_space,
+            )
+
+    @staticmethod
+    def _encode_frame_for_clip(
+        frame_np: np.ndarray,
+        clip_info: Optional[dict],
+    ) -> bytes:
+        """
+        Encode a float32 HWC frame into raw bytes matching the clip's
+        native format so wiretap_rw_frame can write it directly.
+
+        Wiretap stores frames bottom-to-top (origin at bottom-left).
+        """
+        frame_f32 = np.clip(frame_np, 0.0, 1.0).astype(np.float32)
+        # Wiretap stores frames bottom-to-top
+        frame_f32 = np.flipud(frame_f32)
+        h, w, c = frame_f32.shape
+
+        bit_depth = 32
+        if clip_info:
+            bit_depth = clip_info.get("bit_depth", 32)
+
+        if bit_depth == 10:
+            # Pack to 10-bit DPX method A: [10R][10G][10B][2pad] per uint32
+            # Big-endian, MSB-first
+            r = (frame_f32[:, :, 0] * 1023.0 + 0.5).astype(np.uint32)
+            g = (frame_f32[:, :, 1] * 1023.0 + 0.5).astype(np.uint32)
+            b = (frame_f32[:, :, 2] * 1023.0 + 0.5).astype(np.uint32)
+            packed = (r << 22) | (g << 12) | (b << 2)
+            return packed.astype(">u4").tobytes()
+
+        elif bit_depth == 16:
+            # 16-bit half-float interleaved RGB
+            frame_f16 = frame_f32.astype(np.float16)
+            return np.ascontiguousarray(frame_f16).tobytes()
+
+        elif bit_depth == 12:
+            # 12-bit packed into 16-bit words per channel
+            r = (frame_f32[:, :, 0] * 4095.0 + 0.5).astype(np.uint16)
+            g = (frame_f32[:, :, 1] * 4095.0 + 0.5).astype(np.uint16)
+            b = (frame_f32[:, :, 2] * 4095.0 + 0.5).astype(np.uint16)
+            interleaved = np.stack([r, g, b], axis=-1)
+            return np.ascontiguousarray(interleaved).tobytes()
+
+        elif bit_depth == 8:
+            # 8-bit unsigned int RGB
+            frame_u8 = (frame_f32 * 255.0 + 0.5).astype(np.uint8)
+            return np.ascontiguousarray(frame_u8).tobytes()
+
+        else:
+            # Default: 32-bit float RGB interleaved
+            return np.ascontiguousarray(frame_f32).tobytes()
+
+    @staticmethod
+    def _cleanup_tmp(tmp_dir: str):
+        """Remove temporary EXR files."""
+        import os
+        import shutil
+        try:
+            if os.path.isdir(tmp_dir):
+                shutil.rmtree(tmp_dir)
+                logger.debug(f"Cleaned up temp dir: {tmp_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to clean up {tmp_dir}: {e}")
 
     def _save_frame_exr(
         self, frame_np: np.ndarray, path: str, colour_space: str = ""
     ) -> bool:
-        """Save a single frame as a 32-bit float EXR file.
+        """Save a single frame as a half-float (16-bit) EXR file.
 
         Tries OpenEXR first, then OpenImageIO, then falls back to
-        writing a 16-bit PNG via numpy/torch.
+        a 16-bit TIFF via PIL.
         """
         frame_f32 = np.clip(frame_np, 0.0, 1.0).astype(np.float32)
+        h, w, c = frame_f32.shape
 
-        # Try OpenEXR
+        # Try OpenEXR — write as half-float (16-bit)
         try:
             import OpenEXR
             import Imath
 
-            h, w, c = frame_f32.shape
             header = OpenEXR.Header(w, h)
-            float_chan = Imath.Channel(Imath.PixelType(Imath.PixelType.FLOAT))
+            half_chan = Imath.Channel(Imath.PixelType(Imath.PixelType.HALF))
             header["channels"] = {
-                "R": float_chan, "G": float_chan, "B": float_chan
+                "R": half_chan, "G": half_chan, "B": half_chan
             }
             if colour_space:
                 header["chromaticities"] = colour_space
 
-            r = frame_f32[:, :, 0].tobytes()
-            g = frame_f32[:, :, 1].tobytes()
-            b = frame_f32[:, :, 2].tobytes()
+            frame_f16 = frame_f32.astype(np.float16)
+            r = frame_f16[:, :, 0].tobytes()
+            g = frame_f16[:, :, 1].tobytes()
+            b = frame_f16[:, :, 2].tobytes()
 
             out = OpenEXR.OutputFile(path, header)
             out.writePixels({"R": r, "G": g, "B": b})
@@ -347,12 +615,11 @@ class WiretapFrameWriter:
         except Exception as e:
             logger.warning(f"OpenEXR write failed: {e}")
 
-        # Try OpenImageIO
+        # Try OpenImageIO — write as half-float (16-bit)
         try:
             import OpenImageIO as oiio
 
-            h, w, c = frame_f32.shape
-            spec = oiio.ImageSpec(w, h, c, oiio.FLOAT)
+            spec = oiio.ImageSpec(w, h, c, oiio.HALF)
             if colour_space:
                 spec.attribute("oiio:ColorSpace", colour_space)
 
@@ -367,15 +634,18 @@ class WiretapFrameWriter:
         except Exception as e:
             logger.warning(f"OpenImageIO write failed: {e}")
 
-        # Fallback: save as 16-bit PNG (not ideal but universally supported)
+        # Fallback: 8-bit PNG via PIL (lossy — install OpenEXR for proper output)
         try:
             from PIL import Image
 
-            frame_u16 = (frame_f32 * 65535).astype(np.uint16)
+            frame_u8 = (frame_f32 * 255.0 + 0.5).clip(0, 255).astype(np.uint8)
             png_path = path.replace(".exr", ".png")
-            img = Image.fromarray(frame_u16)
+            img = Image.fromarray(frame_u8, mode="RGB")
             img.save(png_path)
-            logger.info(f"Saved as PNG fallback: {png_path}")
+            logger.warning(
+                f"Saved as 8-bit PNG (lossy): {png_path} — "
+                f"install OpenEXR or OpenImageIO for half-float EXR output"
+            )
             return True
         except ImportError:
             pass
