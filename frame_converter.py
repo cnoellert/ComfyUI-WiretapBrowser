@@ -39,6 +39,13 @@ def raw_rgb_to_tensor(
     height = format_info["height"]
     bit_depth = format_info["bit_depth"]
     num_channels = format_info.get("num_channels", 3)
+    format_tag = format_info.get("format_tag", "")
+    is_float = "float" in format_tag.lower()
+
+    logger.debug(
+        f"Decoding frame: {width}x{height} bit_depth={bit_depth} "
+        f"tag={format_tag} float={is_float}"
+    )
 
     arr = np.frombuffer(raw_bytes, dtype=np.uint8)
 
@@ -53,9 +60,15 @@ def raw_rgb_to_tensor(
         else:
             image = _decode_12bit_unpacked(arr, width, height)
     elif bit_depth == 16:
-        image = _decode_16bit_float(arr, width, height)
+        if is_float:
+            image = _decode_16bit_float(arr, width, height)
+        else:
+            image = _decode_16bit_int(arr, width, height)
     elif bit_depth == 32:
-        image = _decode_32bit_float(arr, width, height)
+        if is_float:
+            image = _decode_32bit_float(arr, width, height)
+        else:
+            image = _decode_32bit_int(arr, width, height)
     else:
         logger.warning(
             f"Unknown bit depth {bit_depth}, attempting 8-bit decode"
@@ -64,16 +77,6 @@ def raw_rgb_to_tensor(
 
     # Wiretap stores frames bottom-to-top (like BMP/OpenGL); flip to top-down.
     image = np.flipud(image)
-
-    # Apply colour space conversion if the source is scene-linear.
-    # ComfyUI preview expects sRGB, so linear data looks crushed/posterized
-    # without a transfer function.
-    colour_space = format_info.get("colour_space", "").lower()
-    if colour_space in (
-        "acescg", "aces", "linear", "scene-linear", "lin_ap1",
-        "aces - acescg", "aces - aces2065-1",
-    ):
-        image = _linear_to_srgb(image)
 
     # Ensure correct shape: (H, W, 3) float32 in [0, 1]
     if image.ndim == 2:
@@ -89,15 +92,6 @@ def raw_rgb_to_tensor(
         tensor = tensor.unsqueeze(0)
 
     return tensor
-
-
-def _linear_to_srgb(image: np.ndarray) -> np.ndarray:
-    """Apply the sRGB transfer function (linear → sRGB gamma)."""
-    image = np.clip(image, 0.0, 1.0)
-    # sRGB piecewise transfer: linear below 0.0031308, power curve above
-    low = image * 12.92
-    high = 1.055 * np.power(image, 1.0 / 2.4) - 0.055
-    return np.where(image <= 0.0031308, low, high)
 
 
 def _decode_8bit(arr: np.ndarray, width: int, height: int) -> np.ndarray:
@@ -254,6 +248,39 @@ def _decode_12bit_unpacked(arr: np.ndarray, width: int, height: int) -> np.ndarr
                     val = arr[offset] | (arr[offset + 1] << 8)
                     image[y, x, c] = (val & 0x0FFF) / 4095.0
     return image
+
+
+def _decode_16bit_int(arr: np.ndarray, width: int, height: int) -> np.ndarray:
+    """
+    Decode 16-bit unsigned integer RGB: 6 bytes per pixel.
+    Format tag: rgb or rgb_le (little-endian uint16 per channel).
+    """
+    try:
+        total = height * width * 3 * 2
+        if len(arr) >= total:
+            words = np.frombuffer(arr[:total].tobytes(), dtype=np.uint16)
+            image = words.reshape(height, width, 3).astype(np.float32) / 65535.0
+            return image
+    except Exception as e:
+        logger.warning(f"16-bit int decode failed: {e}")
+
+    return np.zeros((height, width, 3), dtype=np.float32)
+
+
+def _decode_32bit_int(arr: np.ndarray, width: int, height: int) -> np.ndarray:
+    """
+    Decode 32-bit unsigned integer RGB: 12 bytes per pixel.
+    """
+    try:
+        total = height * width * 3 * 4
+        if len(arr) >= total:
+            words = np.frombuffer(arr[:total].tobytes(), dtype=np.uint32)
+            image = words.reshape(height, width, 3).astype(np.float64) / 4294967295.0
+            return image.astype(np.float32)
+    except Exception as e:
+        logger.warning(f"32-bit int decode failed: {e}")
+
+    return np.zeros((height, width, 3), dtype=np.float32)
 
 
 def _decode_16bit_float(arr: np.ndarray, width: int, height: int) -> np.ndarray:

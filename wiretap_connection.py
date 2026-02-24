@@ -131,6 +131,26 @@ else:
     )
 
 
+def _find_wiretap_tool(name: str) -> Optional[str]:
+    """Locate a Wiretap CLI tool (e.g. wiretap_rw_frame) on disk."""
+    search_dirs = [
+        "/opt/Autodesk/wiretap/tools/current",
+        "/usr/discreet/wiretap/tools/current",
+    ]
+    # Also check versioned dirs, newest first
+    search_dirs.extend(
+        sorted(glob.glob("/opt/Autodesk/wiretap/tools/20*"), reverse=True)
+    )
+    search_dirs.extend(
+        sorted(glob.glob("/opt/Autodesk/mio/20*"), reverse=True)
+    )
+    for d in search_dirs:
+        path = os.path.join(d, name)
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return None
+
+
 def is_wiretap_available() -> bool:
     return _wiretap_available
 
@@ -499,6 +519,11 @@ class WiretapConnectionManager:
         """
         Read a single frame from a clip.
 
+        The Boost.Python wrapper for readFrame maps char* to Python str,
+        but Python 3 strings are immutable so the C layer writes to a
+        discarded copy.  We use the wiretap_rw_frame CLI tool instead,
+        which writes the raw frame to a temp file that we read back.
+
         Returns:
             Tuple of (raw_frame_bytes, format_dict) or None on failure.
         """
@@ -514,32 +539,81 @@ class WiretapConnectionManager:
             logger.error(f"Failed to get clip format: {node_handle.lastError()}")
             return None
 
-        buffer_size = fmt.frameBufferSize()
-        # The Boost.Python/SWIG wrapper maps char* to Python str.
-        # Passing a null-byte string lets the C layer write into it.
-        buff = "\0" * buffer_size
-
-        if not node_handle.readFrame(frame_number, buff, buffer_size):
-            logger.error(
-                f"Failed to read frame {frame_number}: {node_handle.lastError()}"
-            )
-            return None
-
         format_info = {
             "width": fmt.width(),
             "height": fmt.height(),
             "bits_per_pixel": fmt.bitsPerPixel(),
             "num_channels": fmt.numChannels(),
             "bit_depth": fmt.bitsPerPixel() // max(fmt.numChannels(), 1),
-            "frame_buffer_size": buffer_size,
+            "frame_buffer_size": fmt.frameBufferSize(),
             "format_tag": fmt.formatTag(),
             "colour_space": fmt.colourSpace(),
         }
 
-        # Convert the str buffer to bytes; latin-1 is a 1:1 byte mapping.
-        raw_bytes = buff.encode("latin-1") if isinstance(buff, str) else buff
+        # Use the CLI tool to read the frame to a temp file
+        raw_bytes = self._read_frame_via_cli(
+            hostname, node_id, frame_number, server_type
+        )
+        if raw_bytes is None:
+            return None
 
         return (raw_bytes, format_info)
+
+    def _read_frame_via_cli(
+        self,
+        hostname: str,
+        node_id: str,
+        frame_number: int,
+        server_type: str,
+    ) -> Optional[bytes]:
+        """Read a frame using the wiretap_rw_frame CLI tool."""
+        import tempfile
+
+        tool = _find_wiretap_tool("wiretap_rw_frame")
+        if not tool:
+            logger.error("wiretap_rw_frame not found")
+            return None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_path = os.path.join(tmpdir, "frame")
+            cmd = [
+                tool,
+                "--host", f"{hostname}:{server_type}",
+                "--node_id", node_id,
+                "--frame_index", str(frame_number),
+                "--file", out_path,
+            ]
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=30,
+                )
+                # The tool writes {base}_{index}.{ext} — the extension
+                # varies (or may be empty, giving a trailing dot).
+                candidates = [
+                    f for f in os.listdir(tmpdir) if f.startswith("frame")
+                ]
+                if not candidates:
+                    logger.error(
+                        f"wiretap_rw_frame produced no output: "
+                        f"{result.stdout} {result.stderr}"
+                    )
+                    return None
+
+                raw_file = os.path.join(tmpdir, candidates[0])
+                data = open(raw_file, "rb").read()
+                if not data:
+                    logger.error(
+                        f"wiretap_rw_frame wrote empty file for frame "
+                        f"{frame_number}: {result.stdout} {result.stderr}"
+                    )
+                    return None
+                return data
+            except subprocess.TimeoutExpired:
+                logger.error(f"wiretap_rw_frame timed out for frame {frame_number}")
+                return None
+            except Exception as e:
+                logger.error(f"wiretap_rw_frame failed: {e}")
+                return None
 
     # -----------------------------------------------------------------------
     # Mock mode for development without a Flame workstation
