@@ -34,6 +34,7 @@ const ICONS = {
     download: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="8 17 12 21 16 17"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/></svg>`,
     file: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>`,
     loading: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"/><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg>`,
+    refresh: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>`,
 };
 
 function getIcon(name) {
@@ -98,6 +99,19 @@ const MODAL_STYLES = `
     font-size: 20px; padding: 4px 8px; border-radius: 4px;
 }
 .wiretap-header .close-btn:hover { background: #333; color: #fff; }
+.wiretap-header .refresh-btn {
+    background: none; border: 1px solid #444; color: #888; cursor: pointer;
+    font-size: 12px; padding: 4px 8px; border-radius: 4px;
+    display: flex; align-items: center; gap: 4px;
+}
+.wiretap-header .refresh-btn:hover { background: #333; color: #fff; border-color: #666; }
+.wiretap-header .refresh-btn.spinning svg {
+    animation: wt-spin 0.8s linear infinite;
+}
+@keyframes wt-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
 .wiretap-mode-badge {
     font-size: 10px; font-weight: 600; padding: 2px 8px;
     border-radius: 3px; text-transform: uppercase; letter-spacing: 0.5px;
@@ -252,7 +266,10 @@ class WiretapBrowserDialog {
                         ${modeLabel}
                     </span>
                 </h3>
-                <button class="close-btn">&times;</button>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <button class="refresh-btn" id="wt-refresh" title="Refresh listing">${getIcon("refresh")} Refresh</button>
+                    <button class="close-btn">&times;</button>
+                </div>
             </div>
             ${this.isMockMode
                 ? '<div class="wiretap-mock-banner">⚠ Mock Mode — Wiretap SDK not detected. Showing sample data.</div>'
@@ -275,6 +292,7 @@ class WiretapBrowserDialog {
 
         modal.querySelector(".close-btn").onclick = () => this.close();
         modal.querySelector("#wt-cancel").onclick = () => this.close();
+        modal.querySelector("#wt-refresh").onclick = () => this._refresh();
         modal.querySelector("#wt-select").onclick = () => {
             if (this.selectedNode) {
                 this.onSelect(this.selectedNode);
@@ -318,7 +336,15 @@ class WiretapBrowserDialog {
         if (hint) hint.textContent = this.config.emptyHint;
     }
 
-    async _loadChildren(nodeId) {
+    async _refresh() {
+        const btn = this.overlay.querySelector("#wt-refresh");
+        btn.classList.add("spinning");
+        this._clearSelection();
+        await this._loadChildren(this.currentPath, true);
+        btn.classList.remove("spinning");
+    }
+
+    async _loadChildren(nodeId, refresh = false) {
         const tree = this.overlay.querySelector("#wt-tree");
         tree.innerHTML = `<div class="wiretap-loading">${getIcon("loading")} Loading...</div>`;
         this._updateBreadcrumb();
@@ -329,6 +355,7 @@ class WiretapBrowserDialog {
                 node_id: nodeId,
                 server_type: this.serverType,
             });
+            if (refresh) params.set("refresh", "1");
             const res = await api.fetchApi(`/wiretap/browse?${params}`);
             const data = await res.json();
 

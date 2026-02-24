@@ -302,6 +302,13 @@ class WiretapConnectionManager:
             self._initialized = False
             logger.info("Wiretap client shut down")
 
+    def invalidate_server(self, hostname: str, server_type: str = "IFFFS"):
+        """Drop a cached server handle so the next call reconnects fresh."""
+        server_id_str = f"{hostname}:{server_type}"
+        if server_id_str in self._servers:
+            logger.info(f"Invalidating cached server handle for {server_id_str}")
+            del self._servers[server_id_str]
+
     def _get_server_handle(self, hostname: str, server_type: str = "IFFFS"):
         """Get or create a server handle.
 

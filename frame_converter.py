@@ -40,15 +40,17 @@ def raw_rgb_to_tensor(
     bit_depth = format_info["bit_depth"]
     num_channels = format_info.get("num_channels", 3)
     format_tag = format_info.get("format_tag", "")
-    is_float = "float" in format_tag.lower()
 
     logger.debug(
         f"Decoding frame: {width}x{height} bit_depth={bit_depth} "
-        f"tag={format_tag} float={is_float}"
+        f"tag={format_tag}"
     )
 
     arr = np.frombuffer(raw_bytes, dtype=np.uint8)
 
+    # Flame bit-depth conventions:
+    #   8, 10, 12  — integer formats
+    #   16, 32     — always floating point (half / single precision)
     if bit_depth == 8:
         image = _decode_8bit(arr, width, height)
     elif bit_depth == 10:
@@ -60,15 +62,9 @@ def raw_rgb_to_tensor(
         else:
             image = _decode_12bit_unpacked(arr, width, height)
     elif bit_depth == 16:
-        if is_float:
-            image = _decode_16bit_float(arr, width, height)
-        else:
-            image = _decode_16bit_int(arr, width, height)
+        image = _decode_16bit_float(arr, width, height)
     elif bit_depth == 32:
-        if is_float:
-            image = _decode_32bit_float(arr, width, height)
-        else:
-            image = _decode_32bit_int(arr, width, height)
+        image = _decode_32bit_float(arr, width, height)
     else:
         logger.warning(
             f"Unknown bit depth {bit_depth}, attempting 8-bit decode"

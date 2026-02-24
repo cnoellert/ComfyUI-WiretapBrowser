@@ -50,9 +50,12 @@ async def wiretap_browse(request):
     hostname = request.query.get("hostname", "localhost")
     node_id = request.query.get("node_id", "/")
     server_type = request.query.get("server_type", "IFFFS")
+    refresh = request.query.get("refresh", "")
 
     try:
         mgr = get_connection_manager()
+        if refresh:
+            mgr.invalidate_server(hostname, server_type)
         children = mgr.get_children(hostname, node_id, server_type)
         return web.json_response({
             "success": True,
