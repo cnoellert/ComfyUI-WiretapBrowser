@@ -160,6 +160,37 @@ const MODAL_STYLES = `
     padding: 6px 16px; background: #3d2a0d; border-bottom: 1px solid #5c4a1a;
     font-size: 11px; color: #e6a817;
 }
+.wiretap-create-bar {
+    padding: 6px 16px; border-bottom: 1px solid #1a3a5c;
+    display: flex; align-items: center; gap: 8px;
+}
+.wiretap-create-bar .btn-create {
+    padding: 3px 10px; border-radius: 4px; border: 1px solid #5dade2;
+    background: transparent; color: #5dade2; cursor: pointer;
+    font-size: 11px; display: flex; align-items: center; gap: 4px;
+}
+.wiretap-create-bar .btn-create:hover {
+    background: #1a3a5c; border-color: #85c1e9;
+    color: #85c1e9;
+}
+.wiretap-create-bar .create-input {
+    flex: 1; padding: 3px 8px; border-radius: 4px;
+    border: 1px solid #5dade2; background: #0d1b2a; color: #e0e0e0;
+    font-size: 12px; outline: none;
+}
+.wiretap-create-bar .create-input:focus {
+    border-color: #85c1e9;
+}
+.wiretap-create-bar .btn-confirm {
+    padding: 3px 10px; border-radius: 4px; border: 1px solid #2ecc71;
+    background: #2ecc71; color: #000; cursor: pointer;
+    font-size: 11px; font-weight: 600;
+}
+.wiretap-create-bar .btn-confirm:hover { background: #27ae60; }
+.wiretap-create-bar .btn-create-cancel {
+    padding: 3px 8px; border-radius: 4px; border: 1px solid #555;
+    background: transparent; color: #999; cursor: pointer; font-size: 11px;
+}
 .wiretap-tree {
     flex: 1; overflow-y: auto; padding: 8px 0; min-height: 200px;
     max-height: 400px;
@@ -323,6 +354,7 @@ class WiretapBrowserDialog {
             <div class="wiretap-workspace-warn" id="wt-workspace-warn" style="display:none">
                 Workspace is read-only while open in Flame. Use a Shared Library instead.
             </div>
+            <div class="wiretap-create-bar" id="wt-create-bar" style="display:none"></div>
             <div class="wiretap-tree" id="wt-tree"></div>
             <div class="wiretap-info-panel" id="wt-info" style="display:none"></div>
             <div class="wiretap-footer">
@@ -425,6 +457,98 @@ class WiretapBrowserDialog {
         }
     }
 
+    // Map container type → what child type can be created
+    static _creatableChild(containerType) {
+        const map = {
+            "VOLUME": { type: "PROJECT", label: "Project" },
+            "LIBRARY_LIST": { type: "LIBRARY", label: "Library" },
+            "LIBRARY": { type: "REEL", label: "Reel" },
+        };
+        return map[containerType] || null;
+    }
+
+    _updateCreateBar() {
+        const bar = this.overlay.querySelector("#wt-create-bar");
+        if (!bar || this.mode !== "destination") {
+            if (bar) bar.style.display = "none";
+            return;
+        }
+
+        // Check if we're inside a Workspace (no create there)
+        const inWorkspace = this.pathHistory.some((h) => h.container
+            && h.container.node_type === "WORKSPACE");
+
+        const ct = this._currentContainer?.node_type;
+        const child = ct ? WiretapBrowserDialog._creatableChild(ct) : null;
+
+        if (!child || inWorkspace) {
+            bar.style.display = "none";
+            return;
+        }
+
+        bar.style.display = "flex";
+        bar.innerHTML = `
+            <button class="btn-create" id="wt-btn-create">+ New ${child.label}</button>
+        `;
+        bar.querySelector("#wt-btn-create").onclick = () => this._showCreateInput(child);
+    }
+
+    _showCreateInput(child) {
+        const bar = this.overlay.querySelector("#wt-create-bar");
+        bar.innerHTML = `
+            <input class="create-input" id="wt-create-name"
+                placeholder="${child.label} name..." autofocus />
+            <button class="btn-confirm" id="wt-create-ok">Create</button>
+            <button class="btn-create-cancel" id="wt-create-cancel">Cancel</button>
+        `;
+        const input = bar.querySelector("#wt-create-name");
+        input.focus();
+
+        const doCreate = async () => {
+            const name = input.value.trim();
+            if (!name) return;
+            bar.innerHTML = `<span style="color:#999; font-size:11px;">Creating ${child.label}...</span>`;
+            try {
+                const res = await api.fetchApi("/wiretap/create_node", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        hostname: this.hostname,
+                        parent_node_id: this.currentPath,
+                        node_type: child.type,
+                        display_name: name,
+                        server_type: this.serverType,
+                    }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    // Refresh the tree to show the new node
+                    await this._loadChildren(this.currentPath, true);
+                } else {
+                    const isReadOnly = data.error && (
+                        data.error.includes("read only") || data.error.includes("Locked by"));
+                    const hint = isReadOnly
+                        ? " Projects opened in Flame are permanently read-only for structural changes. Write to an existing reel instead."
+                        : "";
+                    bar.innerHTML = `<span style="color:#e74c3c; font-size:11px;">
+                        Failed: ${data.error}${hint}</span>`;
+                    setTimeout(() => this._updateCreateBar(), 5000);
+                }
+            } catch (e) {
+                bar.innerHTML = `<span style="color:#e74c3c; font-size:11px;">
+                    Error: ${e.message}</span>`;
+                setTimeout(() => this._updateCreateBar(), 3000);
+            }
+        };
+
+        bar.querySelector("#wt-create-ok").onclick = doCreate;
+        input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") doCreate();
+            if (e.key === "Escape") this._updateCreateBar();
+        });
+        bar.querySelector("#wt-create-cancel").onclick = () => this._updateCreateBar();
+    }
+
     async _refresh() {
         const btn = this.overlay.querySelector("#wt-refresh");
         btn.classList.add("spinning");
@@ -438,6 +562,7 @@ class WiretapBrowserDialog {
         tree.innerHTML = `<div class="wiretap-loading">${getIcon("loading")} Loading...</div>`;
         this._updateBreadcrumb();
         this._updateSelectCurrentBar();
+        this._updateCreateBar();
 
         try {
             const params = new URLSearchParams({

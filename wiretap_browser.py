@@ -16,6 +16,7 @@ from .wiretap_connection import (
     get_connection_manager,
     is_wiretap_available,
     get_wiretap_import_error,
+    get_sdk_diagnostics,
     WiretapNode,
     NodeType,
 )
@@ -29,11 +30,13 @@ logger = logging.getLogger("ComfyUI-WiretapBrowser")
 
 @PromptServer.instance.routes.get("/wiretap/status")
 async def wiretap_status(request):
-    """Check Wiretap SDK availability."""
+    """Check Wiretap SDK availability and diagnostics."""
+    diag = get_sdk_diagnostics()
     return web.json_response({
-        "available": is_wiretap_available(),
-        "error": get_wiretap_import_error(),
-        "mock_mode": not is_wiretap_available(),
+        "available": diag["sdk_available"],
+        "error": diag.get("import_error"),
+        "mock_mode": not diag["sdk_available"],
+        "diagnostics": diag,
     })
 
 
@@ -69,6 +72,61 @@ async def wiretap_browse(request):
             "error": str(e),
             "children": [],
         }, status=500)
+
+
+@PromptServer.instance.routes.post("/wiretap/create_node")
+async def wiretap_create_node(request):
+    """
+    Create a new node (LIBRARY, REEL, etc.) under a parent.
+
+    JSON body:
+        hostname: Flame workstation hostname/IP
+        parent_node_id: Parent node path
+        node_type: Type to create (e.g. "LIBRARY", "REEL")
+        display_name: Name for the new node
+        server_type: "IFFFS" (default)
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(
+            {"success": False, "error": "Invalid JSON body"}, status=400
+        )
+
+    hostname = body.get("hostname", "localhost")
+    parent_node_id = body.get("parent_node_id", "")
+    node_type = body.get("node_type", "")
+    display_name = body.get("display_name", "")
+    server_type = body.get("server_type", "IFFFS")
+
+    if not parent_node_id or not node_type or not display_name:
+        return web.json_response(
+            {"success": False, "error": "parent_node_id, node_type, and display_name required"},
+            status=400,
+        )
+
+    try:
+        mgr = get_connection_manager()
+        new_id = mgr.create_node(
+            hostname, parent_node_id, node_type, display_name, server_type
+        )
+        if new_id:
+            return web.json_response({
+                "success": True,
+                "node_id": new_id,
+                "display_name": display_name,
+                "node_type": node_type,
+            })
+        else:
+            return web.json_response(
+                {"success": False, "error": f"Failed to create {node_type} '{display_name}'"},
+                status=500,
+            )
+    except Exception as e:
+        logger.error(f"Create node error: {e}", exc_info=True)
+        return web.json_response(
+            {"success": False, "error": str(e)}, status=500
+        )
 
 
 @PromptServer.instance.routes.get("/wiretap/clip_info")
@@ -224,12 +282,39 @@ class WiretapServerInfo:
     def get_info(self, hostname: str):
         status_lines = []
 
-        status_lines.append(f"Wiretap SDK: {'Available' if is_wiretap_available() else 'NOT FOUND (mock mode)'}")
-        if not is_wiretap_available():
-            status_lines.append(f"Import error: {get_wiretap_import_error()}")
+        # SDK diagnostics
+        diag = get_sdk_diagnostics()
+        if diag["sdk_available"]:
+            status_lines.append(f"Wiretap SDK: Available")
+            if "sdk_path" in diag:
+                status_lines.append(f"  Module: {diag['sdk_path']}")
+        else:
+            status_lines.append("Wiretap SDK: NOT FOUND (mock mode)")
+            status_lines.append(f"  Error: {diag.get('import_error', 'unknown')}")
+            status_lines.append(f"  Python: {diag['python_version']} (SDK requires 3.11)")
+            status_lines.append(
+                "  Install: https://aps.autodesk.com/developer/overview/wiretap"
+            )
+            status_lines.append(
+                "  Or set WIRETAP_SDK_PATH, WIRETAP_TOOLS_DIR, WIRETAP_LIB_DIR"
+            )
 
+        # CLI tools
+        status_lines.append("")
+        status_lines.append("CLI Tools:")
+        for name, path in diag["cli_tools"].items():
+            status_lines.append(f"  {name}: {path}")
+
+        # Environment overrides
+        if diag["env_overrides"]:
+            status_lines.append("")
+            status_lines.append("Environment overrides:")
+            for var, val in diag["env_overrides"].items():
+                status_lines.append(f"  {var}={val}")
+
+        # Server connectivity
+        status_lines.append("")
         status_lines.append(f"Target host: {hostname}")
-
         try:
             mgr = get_connection_manager()
             children = mgr.get_children(hostname, "/projects", "IFFFS")

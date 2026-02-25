@@ -16,19 +16,45 @@ logger = logging.getLogger("ComfyUI-WiretapBrowser")
 
 # ---------------------------------------------------------------------------
 # Wiretap SDK import handling
-# The Wiretap Python SDK ships with Flame and is typically located at:
-#   /opt/Autodesk/wiretap/tools/current/python
-#   /usr/discreet/wiretap/tools/current/python
-# Users can also set WIRETAP_SDK_PATH environment variable.
+#
+# The Wiretap Python SDK ships with Flame and can also be installed
+# standalone from the Autodesk Platform Services developer portal:
+#   https://aps.autodesk.com/developer/overview/wiretap
+#
+# Default locations (Flame install):
+#   /opt/Autodesk/python/<version>/lib/python3.11/site-packages/adsk/
+#   /opt/Autodesk/wiretap/tools/current/   (CLI tools)
+#
+# Environment variables for custom installs:
+#   WIRETAP_SDK_PATH  — directory containing the `adsk` Python package
+#   WIRETAP_TOOLS_DIR — directory containing CLI tools (wiretap_rw_frame, etc.)
+#   WIRETAP_LIB_DIR   — directory containing libwiretapClientAPI.dylib/.so
+#
+# No Flame license is required on the client machine — the SDK only
+# needs network access to a Flame workstation running the IFFFS server.
 # ---------------------------------------------------------------------------
 
 import glob
 import subprocess
 import json as _json
 
+# Resolve environment overrides
+_env_sdk_path = os.environ.get("WIRETAP_SDK_PATH", "")
+_env_tools_dir = os.environ.get("WIRETAP_TOOLS_DIR", "")
+_env_lib_dir = os.environ.get("WIRETAP_LIB_DIR", "")
+
+# If WIRETAP_LIB_DIR is set, prepend to DYLD_LIBRARY_PATH / LD_LIBRARY_PATH
+# so the .so/.dylib can find libwiretapClientAPI at load time.
+if _env_lib_dir and os.path.isdir(_env_lib_dir):
+    _ld_var = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
+    _existing = os.environ.get(_ld_var, "")
+    if _env_lib_dir not in _existing:
+        os.environ[_ld_var] = f"{_env_lib_dir}:{_existing}" if _existing else _env_lib_dir
+        logger.info(f"Added {_env_lib_dir} to {_ld_var}")
+
 # Static paths to check first
 WIRETAP_SDK_PATHS = [
-    os.environ.get("WIRETAP_SDK_PATH", ""),
+    _env_sdk_path,
     "/opt/Autodesk/wiretap/tools/current/python",
     "/usr/discreet/wiretap/tools/current/python",
     "/opt/Autodesk/wiretap/tools/current",
@@ -125,19 +151,31 @@ if _probe_ok:
 else:
     _wiretap_import_error = _probe_msg
     logger.warning(
-        f"Wiretap SDK probe failed: {_probe_msg}. "
-        f"Python {sys.version_info.major}.{sys.version_info.minor} | "
-        f"Searched: {[p for p in WIRETAP_SDK_PATHS if p]}. "
-        f"The browser will run in MOCK mode for development."
+        f"Wiretap SDK not found — running in MOCK mode.\n"
+        f"  Reason: {_probe_msg}\n"
+        f"  Python: {sys.version_info.major}.{sys.version_info.minor} "
+        f"(SDK requires 3.11)\n"
+        f"  Searched: {[p for p in WIRETAP_SDK_PATHS if p]}\n"
+        f"  To fix: install Wiretap SDK from "
+        f"https://aps.autodesk.com/developer/overview/wiretap\n"
+        f"  Or set WIRETAP_SDK_PATH to the directory containing the `adsk` package.\n"
+        f"  CLI tools: set WIRETAP_TOOLS_DIR if tools are in a non-standard location."
     )
 
 
 def _find_wiretap_tool(name: str) -> Optional[str]:
-    """Locate a Wiretap CLI tool (e.g. wiretap_rw_frame) on disk."""
-    search_dirs = [
+    """Locate a Wiretap CLI tool (e.g. wiretap_rw_frame) on disk.
+
+    Checks WIRETAP_TOOLS_DIR first, then standard Autodesk install paths.
+    """
+    search_dirs = []
+    # Environment override takes priority
+    if _env_tools_dir:
+        search_dirs.append(_env_tools_dir)
+    search_dirs.extend([
         "/opt/Autodesk/wiretap/tools/current",
         "/usr/discreet/wiretap/tools/current",
-    ]
+    ])
     # Also check versioned dirs, newest first
     search_dirs.extend(
         sorted(glob.glob("/opt/Autodesk/wiretap/tools/20*"), reverse=True)
@@ -158,6 +196,41 @@ def is_wiretap_available() -> bool:
 
 def get_wiretap_import_error() -> Optional[str]:
     return _wiretap_import_error
+
+
+def get_sdk_diagnostics() -> Dict[str, Any]:
+    """Return SDK installation diagnostics for troubleshooting."""
+    diag: Dict[str, Any] = {
+        "sdk_available": _wiretap_available,
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "platform": sys.platform,
+        "env_overrides": {},
+        "cli_tools": {},
+    }
+    if _wiretap_import_error:
+        diag["import_error"] = _wiretap_import_error
+    if _wiretap_available:
+        try:
+            import adsk.libwiretapPythonClientAPI as _m
+            diag["sdk_path"] = getattr(_m, "__file__", "unknown")
+        except Exception:
+            pass
+
+    # Environment overrides
+    for var in ("WIRETAP_SDK_PATH", "WIRETAP_TOOLS_DIR", "WIRETAP_LIB_DIR"):
+        val = os.environ.get(var, "")
+        if val:
+            diag["env_overrides"][var] = val
+
+    # CLI tool availability
+    for tool_name in (
+        "wiretap_rw_frame", "wiretap_create_clip",
+        "wiretap_create_node", "wiretap_can_create_node",
+    ):
+        path = _find_wiretap_tool(tool_name)
+        diag["cli_tools"][tool_name] = path or "NOT FOUND"
+
+    return diag
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +364,10 @@ class WiretapConnectionManager:
             return
 
         if not self._initialized:
+            # IFFFS transmits the client's umask as part of connection
+            # credentials and uses it to gate write access.  Flame itself
+            # always sets umask 0 before Wiretap operations.
+            os.umask(0)
             WireTapClientInit()
             self._initialized = True
             logger.info("Wiretap client initialized")
@@ -889,10 +966,11 @@ class WiretapConnectionManager:
         clip_name: str,
         width: int = 1920,
         height: int = 1080,
-        bit_depth: int = 10,
+        bit_depth: int = 16,
         fps: float = 24.0,
         num_frames: int = 1,
         server_type: str = "IFFFS",
+        colour_space: str = "",
     ) -> Optional[str]:
         """
         Create a new clip node via the wiretap_create_clip CLI tool.
@@ -910,6 +988,7 @@ class WiretapConnectionManager:
             fps: Frame rate.
             num_frames: Number of frames to allocate.
             server_type: Server type (normally "IFFFS").
+            colour_space: OCIO colour space name for the clip.
 
         Returns:
             The new clip's node ID, or None on failure.
@@ -919,12 +998,23 @@ class WiretapConnectionManager:
             logger.error("wiretap_create_clip not found")
             return None
 
-        bpp = bit_depth * 3
-        # Map bit_depth to format tag
-        if bit_depth == 32:
-            fmt_tag = "rgb_float_le"
-        else:
-            fmt_tag = "rgb"
+        # Map bit_depth to BPP and format tag.
+        # Flame conventions:
+        #   8-bit:  24bpp, tag "rgb" (integer)
+        #   10-bit: 30bpp, tag "rgb" (integer, packed in 32-bit words)
+        #   12-bit: 48bpp, tag "rgb" (integer in 16-bit words; 36bpp NOT supported)
+        #   16-bit: 48bpp, tag "rgb_float_le" (half-float)
+        #   32-bit: 96bpp, tag "rgb_float_le" (single float)
+        # Note: 12-bit and 16-bit both use 48bpp — the format tag
+        # distinguishes integer (rgb) from float (rgb_float_le).
+        bpp_map = {
+            8:  (24, "rgb"),
+            10: (30, "rgb"),
+            12: (48, "rgb"),           # 12 data bits in 16-bit words
+            16: (48, "rgb_float_le"),  # half-float
+            32: (96, "rgb_float_le"),  # single float
+        }
+        bpp, fmt_tag = bpp_map.get(bit_depth, (48, "rgb_float_le"))
 
         cmd = [
             tool,
@@ -939,6 +1029,8 @@ class WiretapConnectionManager:
             "-s", "progressive",
             "-f", fmt_tag,
         ]
+        if colour_space:
+            cmd.extend(["-C", colour_space])
         logger.info(
             f"Creating clip '{clip_name}' {width}x{height} "
             f"{bit_depth}-bit {fps}fps ({num_frames} frames)"

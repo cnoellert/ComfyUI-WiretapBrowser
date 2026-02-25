@@ -5,15 +5,30 @@ Custom node pack for browsing and loading clips from Autodesk Flame
 via the Wiretap SDK directly into ComfyUI workflows.
 
 Nodes:
-  - WiretapBrowser:      Visual tree browser for the Flame clip library
-  - WiretapClipLoader:   Reads frame data into ComfyUI IMAGE tensors
-  - WiretapFrameWriter:  Writes processed frames back to Flame
-  - WiretapServerInfo:   Connection status and diagnostics
+  - WiretapBrowser:        Visual tree browser for the Flame clip library
+  - WiretapClipLoader:     Reads frame data into ComfyUI IMAGE tensors
+  - WiretapFrameWriter:    Writes processed frames back to Flame
+  - WiretapServerInfo:     Connection status and SDK diagnostics
+  - WiretapOCIOTransform:  OCIO colour space transform
+  - WiretapMetadata:       Clip metadata extraction
 
 Requirements:
-  - Autodesk Wiretap SDK (Python bindings)
-  - Network access to a Flame workstation running the Wiretap server
+  - Autodesk Wiretap SDK (Python bindings + CLI tools)
+    Download: https://aps.autodesk.com/developer/overview/wiretap
+    No Flame license required on the ComfyUI machine.
+  - Network access to a Flame workstation running the IFFFS server
   - OR: runs in mock mode for development without Flame
+
+Setup (ComfyUI on same machine as Flame):
+  SDK is auto-discovered from /opt/Autodesk/. No configuration needed.
+
+Setup (ComfyUI on a separate machine):
+  Install the standalone Wiretap SDK, then set environment variables:
+    WIRETAP_SDK_PATH   — directory containing the `adsk` Python package
+    WIRETAP_TOOLS_DIR  — directory containing CLI tools (wiretap_rw_frame, etc.)
+    WIRETAP_LIB_DIR    — directory containing libwiretapClientAPI.dylib/.so
+
+  Use the Server Info node to verify SDK detection and connectivity.
 """
 
 import logging

@@ -283,6 +283,25 @@ class WiretapFrameWriter:
                         "Leave empty for disk-only mode."
                     ),
                 }),
+                "bit_depth": ([16, 32, 10, 8], {
+                    "default": 16,
+                    "description": (
+                        "Bit depth for Wiretap clip creation. "
+                        "16 = half-float (recommended), 32 = full float, "
+                        "10 = DPX-style integer. "
+                        "12-bit not supported by Flame playback."
+                    ),
+                }),
+                "fps": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 120.0,
+                    "step": 0.001,
+                    "description": (
+                        "Frame rate for new clips (0 = use source fps "
+                        "from Loader, or default 24)"
+                    ),
+                }),
             },
             "optional": {
                 "colour_space": ("STRING", {
@@ -290,6 +309,13 @@ class WiretapFrameWriter:
                     "multiline": False,
                     "forceInput": True,
                     "description": "Colour space to embed in EXR metadata",
+                }),
+                "source_fps": ("FLOAT", {
+                    "forceInput": True,
+                    "description": (
+                        "Wire from Loader fps output to preserve "
+                        "source frame rate automatically"
+                    ),
                 }),
             },
         }
@@ -303,15 +329,20 @@ class WiretapFrameWriter:
         hostname: str,
         server_type: str,
         destination_node_id: str,
+        bit_depth: int = 16,
+        fps: float = 0.0,
         colour_space: str = "",
+        source_fps: float = 0.0,
     ):
         """Write frames to Flame via Wiretap round-trip or to disk as EXR."""
         import os
-        import tempfile
 
         if not output_directory:
             logger.error("No output_directory provided")
             return ("",)
+
+        # Resolve fps: explicit fps input > source_fps wire > default 24
+        actual_fps = fps if fps > 0 else (source_fps if source_fps > 0 else 24.0)
 
         batch_size, h, w, c = images.shape
         wiretap_mode = bool(destination_node_id and destination_node_id.strip())
@@ -321,7 +352,7 @@ class WiretapFrameWriter:
             return self._write_wiretap(
                 images, output_directory, clip_name, start_frame,
                 colour_space, destination_node_id.strip(), hostname,
-                server_type,
+                server_type, bit_depth, actual_fps,
             )
         else:
             # --- Disk-only mode (existing behavior) ---
@@ -369,6 +400,8 @@ class WiretapFrameWriter:
         destination_node_id: str,
         hostname: str,
         server_type: str,
+        bit_depth: int = 16,
+        fps: float = 24.0,
     ):
         """
         Write frames into Flame via Wiretap CLI tools.
@@ -437,8 +470,9 @@ class WiretapFrameWriter:
 
                 target_clip_id = mgr.create_clip_node(
                     hostname, destination_node_id, clip_name,
-                    width=w, height=h, bit_depth=10, fps=24.0,
+                    width=w, height=h, bit_depth=bit_depth, fps=fps,
                     num_frames=batch_size, server_type=server_type,
+                    colour_space=colour_space,
                 )
                 if target_clip_id is None:
                     logger.warning(
@@ -450,32 +484,23 @@ class WiretapFrameWriter:
                         start_frame, colour_space,
                     )
 
-                # wiretap_create_clip always creates a hires sub-node.
+                # wiretap_create_clip creates hires + videotrack + slate.
                 # Append /hires directly — get_children can fail on
                 # freshly-created clips ("Entry not found").
                 hires_id = f"{target_clip_id}/hires"
                 logger.info(f"Using hires sub-node: {hires_id}")
                 target_clip_id = hires_id
 
-                # Ensure hires node has frames allocated
-                mgr.set_num_frames(
-                    hostname, target_clip_id, batch_size, server_type
-                )
+                # Frames already allocated by wiretap_create_clip -N flag.
+                # Do NOT call set_num_frames — it fails with
+                # "The given clip already has a video media."
 
-                # We just created the clip — use known parameters
-                # instead of querying (get_clip_format can fail on
-                # freshly-created nodes).
-                clip_info = {
-                    "width": w,
-                    "height": h,
-                    "bit_depth": 10,
-                    "bits_per_pixel": 30,
-                    "num_channels": 3,
-                    "frame_buffer_size": w * h * 4,  # 10-bit = 4 bytes/pixel
-                }
+                # Use known parameters from creation instead of querying
+                # (get_clip_format can fail on freshly-created nodes).
+                clip_info = self._build_clip_info(w, h, bit_depth)
                 logger.info(
                     f"Target clip format (from creation params): "
-                    f"{w}x{h} 10-bit"
+                    f"{w}x{h} {bit_depth}-bit {fps}fps"
                 )
 
             # Write each frame via CLI tool
@@ -566,6 +591,26 @@ class WiretapFrameWriter:
             return np.ascontiguousarray(frame_f32).tobytes()
 
     @staticmethod
+    def _build_clip_info(w: int, h: int, bit_depth: int) -> dict:
+        """Build a clip_info dict matching what get_clip_format returns."""
+        bpp_map = {
+            8: (24, 3),    # 8-bit: 3 bytes/pixel
+            10: (30, 4),   # 10-bit: 4 bytes/pixel (DPX packed)
+            12: (36, 6),   # 12-bit: 6 bytes/pixel (unpacked)
+            16: (48, 6),   # 16-bit half-float: 6 bytes/pixel
+            32: (96, 12),  # 32-bit float: 12 bytes/pixel
+        }
+        bpp, bytes_per_px = bpp_map.get(bit_depth, (48, 6))
+        return {
+            "width": w,
+            "height": h,
+            "bit_depth": bit_depth,
+            "bits_per_pixel": bpp,
+            "num_channels": 3,
+            "frame_buffer_size": w * h * bytes_per_px,
+        }
+
+    @staticmethod
     def _cleanup_tmp(tmp_dir: str):
         """Remove temporary EXR files."""
         import os
@@ -599,7 +644,7 @@ class WiretapFrameWriter:
                 "R": half_chan, "G": half_chan, "B": half_chan
             }
             if colour_space:
-                header["chromaticities"] = colour_space
+                header["colourSpace"] = colour_space.encode("utf-8")
 
             frame_f16 = frame_f32.astype(np.float16)
             r = frame_f16[:, :, 0].tobytes()
