@@ -229,6 +229,14 @@ class WiretapOCIOTransform:
                 "target_colour_space": (_colour_space_names, {
                     "default": _colour_space_names[0],
                 }),
+                "output_bit_depth": (["passthrough", "8", "12", "16", "32"], {
+                    "default": "passthrough",
+                    "description": (
+                        "Quantize output to a specific bit depth. "
+                        "'passthrough' keeps whatever precision comes in. "
+                        "Use 16 to prevent downstream nodes forcing 32-bit."
+                    ),
+                }),
             },
             "optional": {
                 "source_override": ("STRING", {
@@ -255,6 +263,7 @@ class WiretapOCIOTransform:
         images: torch.Tensor,
         source_colour_space: str,
         target_colour_space: str,
+        output_bit_depth: str = "passthrough",
         source_override: str = "",
         target_override: str = "",
         ocio_config: str = "Auto (best available)",
@@ -269,16 +278,16 @@ class WiretapOCIOTransform:
             logger.warning(
                 "PyOpenColorIO not available — passing through unchanged"
             )
-            return (images, source_colour_space)
+            return (self._quantize(images, output_bit_depth), source_colour_space)
 
         if not source_colour_space:
             logger.warning(
                 "No source colour space provided — passing through unchanged"
             )
-            return (images, target_colour_space)
+            return (self._quantize(images, output_bit_depth), target_colour_space)
 
         if source_colour_space == target_colour_space:
-            return (images, target_colour_space)
+            return (self._quantize(images, output_bit_depth), target_colour_space)
 
         # Resolve config path from dropdown selection
         config_path = _config_path_map.get(ocio_config)
@@ -286,13 +295,13 @@ class WiretapOCIOTransform:
             config_path = _default_config_path
         if not config_path:
             logger.error("No OCIO config available")
-            return (images, source_colour_space)
+            return (self._quantize(images, output_bit_depth), source_colour_space)
 
         try:
             cfg = ocio.Config.CreateFromFile(config_path)
         except Exception as e:
             logger.error(f"Failed to load OCIO config {config_path}: {e}")
-            return (images, source_colour_space)
+            return (self._quantize(images, output_bit_depth), source_colour_space)
 
         # Validate colour space names
         available = set(cs.getName() for cs in cfg.getColorSpaces())
@@ -301,14 +310,14 @@ class WiretapOCIOTransform:
                 f"Source colour space '{source_colour_space}' not found "
                 f"in {os.path.basename(os.path.dirname(config_path))} config"
             )
-            return (images, source_colour_space)
+            return (self._quantize(images, output_bit_depth), source_colour_space)
 
         if target_colour_space not in available:
             logger.error(
                 f"Target colour space '{target_colour_space}' not found "
                 f"in {os.path.basename(os.path.dirname(config_path))} config"
             )
-            return (images, source_colour_space)
+            return (self._quantize(images, output_bit_depth), source_colour_space)
 
         # Build processor
         try:
@@ -321,7 +330,7 @@ class WiretapOCIOTransform:
                 f"OCIO processor failed "
                 f"({source_colour_space} → {target_colour_space}): {e}"
             )
-            return (images, source_colour_space)
+            return (self._quantize(images, output_bit_depth), source_colour_space)
 
         logger.info(
             f"OCIO: {source_colour_space} → {target_colour_space} "
@@ -337,4 +346,36 @@ class WiretapOCIOTransform:
             result_frames.append(torch.from_numpy(frame))
 
         result = torch.stack(result_frames, dim=0)
+
+        # Quantize output if requested
+        result = self._quantize(result, output_bit_depth)
+
         return (result, target_colour_space)
+
+    @staticmethod
+    def _quantize(images: torch.Tensor, bit_depth: str) -> torch.Tensor:
+        """Quantize tensor values to simulate a specific bit depth.
+
+        The tensor remains float32 (ComfyUI's native format), but values
+        are rounded to the number of discrete levels available at the
+        target bit depth. This prevents downstream nodes from seeing
+        full 32-bit precision when it isn't wanted.
+
+        For integer bit depths (8, 12, 16), values are clamped to [0, 1],
+        quantized to 2^N levels, then mapped back to [0, 1] float.
+        For 16-bit float, values are cast to float16 and back.
+        For 32-bit, no change (already float32).
+        """
+        if bit_depth == "passthrough" or bit_depth == "32":
+            return images
+
+        if bit_depth == "16":
+            # Cast to float16 and back — loses precision naturally
+            return images.to(torch.float16).to(torch.float32)
+
+        # Integer quantization: clamp, scale to N-bit range, round, scale back
+        n_bits = int(bit_depth)
+        max_val = (1 << n_bits) - 1  # 255 for 8-bit, 4095 for 12-bit
+        clamped = images.clamp(0.0, 1.0)
+        quantized = torch.round(clamped * max_val) / max_val
+        return quantized
