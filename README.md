@@ -4,6 +4,8 @@
 
 This custom node pack provides a visual tree browser for navigating Flame's clip library via the Wiretap SDK, loading frames as IMAGE tensors for AI-augmented VFX workflows, and writing processed results back to Flame — all without leaving ComfyUI.
 
+[![Demo Video](https://img.shields.io/badge/▶_Watch_Demo-YouTube-red?style=for-the-badge&logo=youtube)](https://www.youtube.com/watch?v=33_jDm1xdbc)
+
 ---
 
 ## Nodes
