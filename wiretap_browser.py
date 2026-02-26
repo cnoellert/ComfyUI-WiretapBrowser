@@ -60,11 +60,15 @@ async def wiretap_browse(request):
         if refresh:
             mgr.invalidate_server(hostname, server_type)
         children = mgr.get_children(hostname, node_id, server_type)
-        return web.json_response({
+        resp = web.json_response({
             "success": True,
             "parent": node_id,
             "children": [c.to_dict() for c in children],
         })
+        # Prevent browser/proxy caching of tree listings
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        return resp
     except Exception as e:
         logger.error(f"Browse error: {e}", exc_info=True)
         return web.json_response({

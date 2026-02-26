@@ -553,8 +553,9 @@ class WiretapBrowserDialog {
         const btn = this.overlay.querySelector("#wt-refresh");
         btn.classList.add("spinning");
         this._clearSelection();
+        // Force fresh fetch with cache-busting timestamp
         await this._loadChildren(this.currentPath, true);
-        btn.classList.remove("spinning");
+        setTimeout(() => btn.classList.remove("spinning"), 300);
     }
 
     async _loadChildren(nodeId, refresh = false) {
@@ -570,7 +571,10 @@ class WiretapBrowserDialog {
                 node_id: nodeId,
                 server_type: this.serverType,
             });
-            if (refresh) params.set("refresh", "1");
+            if (refresh) {
+                params.set("refresh", "1");
+                params.set("_t", Date.now().toString());  // cache-bust
+            }
             const res = await api.fetchApi(`/wiretap/browse?${params}`);
             const data = await res.json();
 
