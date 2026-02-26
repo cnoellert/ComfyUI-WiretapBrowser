@@ -58,8 +58,12 @@ async def wiretap_browse(request):
     try:
         mgr = get_connection_manager()
         if refresh:
-            mgr.invalidate_server(hostname, server_type)
+            logger.info(f"Refresh requested for {hostname}:{server_type} node={node_id}")
         children = mgr.get_children(hostname, node_id, server_type)
+        logger.info(
+            f"Browse {node_id}: {len(children)} children"
+            f"{' (refresh)' if refresh else ''}"
+        )
         resp = web.json_response({
             "success": True,
             "parent": node_id,
@@ -68,6 +72,7 @@ async def wiretap_browse(request):
         # Prevent browser/proxy caching of tree listings
         resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
         resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
         return resp
     except Exception as e:
         logger.error(f"Browse error: {e}", exc_info=True)

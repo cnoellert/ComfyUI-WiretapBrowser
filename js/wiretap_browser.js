@@ -573,9 +573,10 @@ class WiretapBrowserDialog {
             });
             if (refresh) {
                 params.set("refresh", "1");
-                params.set("_t", Date.now().toString());  // cache-bust
             }
-            const res = await api.fetchApi(`/wiretap/browse?${params}`);
+            // Always bypass browser cache for tree listings
+            params.set("_t", Date.now().toString());
+            const res = await api.fetchApi(`/wiretap/browse?${params}`, { cache: "no-store" });
             const data = await res.json();
 
             if (!data.success) {

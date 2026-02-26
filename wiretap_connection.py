@@ -470,8 +470,11 @@ class WiretapConnectionManager:
             )
             return []
 
+        child_count = int(num_children)
+        logger.info(f"SDK reports {child_count} children for {node_id}")
+
         children = []
-        for i in range(int(num_children)):
+        for i in range(child_count):
             child_handle = WireTapNodeHandle()
             child_name = WireTapStr()
             child_type = WireTapStr()
@@ -501,6 +504,9 @@ class WiretapConnectionManager:
                 self._populate_clip_info(child_handle, node)
 
             children.append(node)
+
+        names = [c.display_name for c in children]
+        logger.info(f"get_children({node_id}): {len(children)} items: {names}")
 
         return children
 
