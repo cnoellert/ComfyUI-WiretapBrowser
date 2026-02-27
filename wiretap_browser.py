@@ -58,9 +58,9 @@ async def wiretap_browse(request):
     try:
         mgr = get_connection_manager()
         if refresh:
-            logger.info(f"Refresh requested for {hostname}:{server_type} node={node_id}")
+            logger.debug(f"Refresh requested for {hostname}:{server_type} node={node_id}")
         children = mgr.get_children(hostname, node_id, server_type)
-        logger.info(
+        logger.debug(
             f"Browse {node_id}: {len(children)} children"
             f"{' (refresh)' if refresh else ''}"
         )
