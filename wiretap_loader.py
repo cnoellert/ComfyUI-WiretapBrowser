@@ -45,19 +45,14 @@ class WiretapClipLoader:
                 "clip_node_id": ("STRING", {
                     "default": "",
                     "multiline": False,
-                    "forceInput": True,
-                    "description": "Wiretap node ID from the Browser node",
+                    "description": "Wiretap clip node ID. Use Browse Source to select.",
                 }),
                 "hostname": ("STRING", {
                     "default": "localhost",
                     "multiline": False,
-                    "forceInput": True,
-                    "description": "Flame workstation hostname",
                 }),
-                "server_type": ("STRING", {
+                "server_type": (["IFFFS", "Gateway"], {
                     "default": "IFFFS",
-                    "forceInput": True,
-                    "description": "IFFFS or Gateway",
                 }),
                 "start_frame": ("INT", {
                     "default": 0,
@@ -67,11 +62,11 @@ class WiretapClipLoader:
                     "description": "First frame to load (0-indexed)",
                 }),
                 "frame_count": ("INT", {
-                    "default": 1,
-                    "min": 1,
+                    "default": 0,
+                    "min": 0,
                     "max": 9999,
                     "step": 1,
-                    "description": "Number of frames to load",
+                    "description": "Number of frames to load (0 = all frames)",
                 }),
             },
             "optional": {
@@ -146,7 +141,9 @@ class WiretapClipLoader:
         height = format_info.get("height", 0)
         colour_space = format_info.get("colour_space", "")
 
-        # Clamp frame range
+        # Clamp frame range (frame_count=0 means load all)
+        if frame_count <= 0:
+            frame_count = total_frames
         if start_frame >= total_frames:
             start_frame = max(0, total_frames - 1)
         end_frame = min(start_frame + frame_count, total_frames)
@@ -240,6 +237,10 @@ class WiretapFrameWriter:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("output_path",)
     OUTPUT_NODE = True
+    DESCRIPTION = (
+        "Write frames to Flame via Wiretap. Temp files are written to disk "
+        "and transferred through the Gateway server automatically, then cleaned up."
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
