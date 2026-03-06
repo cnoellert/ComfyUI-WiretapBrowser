@@ -249,6 +249,7 @@ class NodeType(Enum):
     CLIP = "CLIP"
     HIRES = "HIRES"
     LOWRES = "LOWRES"
+    DIR = "DIR"
     UNKNOWN = "UNKNOWN"
 
     @classmethod
@@ -265,6 +266,7 @@ class NodeType(Enum):
             NodeType.SERVER, NodeType.VOLUME, NodeType.PROJECT,
             NodeType.WORKSPACE, NodeType.LIBRARY_LIST, NodeType.LIBRARY,
             NodeType.REEL, NodeType.REEL_GROUP, NodeType.CLIP,
+            NodeType.DIR,
         )
 
     @property
@@ -286,6 +288,7 @@ class NodeType(Enum):
             NodeType.CLIP: "image",
             NodeType.HIRES: "maximize",
             NodeType.LOWRES: "minimize",
+            NodeType.DIR: "folder-open",
         }
         return icons.get(self, "file")
 
