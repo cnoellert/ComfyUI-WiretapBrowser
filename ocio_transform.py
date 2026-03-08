@@ -31,15 +31,20 @@ ocio = None
 try:
     import PyOpenColorIO as ocio
     _ocio_available = True
-    # Suppress noisy warnings about unknown keys (e.g. interop_id in newer configs)
     ocio.SetLoggingLevel(ocio.LOGGING_LEVEL_NONE)
     logger.info(f"PyOpenColorIO loaded: {ocio.__version__}")
-except ImportError as e:
-    _ocio_import_error = str(e)
-    logger.warning(
-        f"PyOpenColorIO not available: {e}. "
-        f"OCIO Transform node will pass through unchanged."
-    )
+except ImportError:
+    try:
+        import OpenColorIO as ocio
+        _ocio_available = True
+        ocio.SetLoggingLevel(ocio.LOGGING_LEVEL_NONE)
+        logger.info(f"OpenColorIO loaded: {ocio.__version__}")
+    except ImportError as e:
+        _ocio_import_error = str(e)
+        logger.warning(
+            f"PyOpenColorIO not available: {e}. "
+            f"OCIO Transform node will pass through unchanged."
+        )
 
 # ---------------------------------------------------------------------------
 # OCIO config discovery (follows projekt-forge conventions)
