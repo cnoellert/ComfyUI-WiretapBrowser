@@ -5,7 +5,7 @@
 This custom node pack provides a visual tree browser for navigating Flame's clip library via the Wiretap SDK, loading frames as IMAGE tensors for AI-augmented VFX workflows, and writing processed results back to Flame — all without leaving ComfyUI.
 
 [![Demo Video](https://img.shields.io/badge/▶_Watch_Demo-YouTube-red?style=for-the-badge&logo=youtube)](https://www.youtube.com/watch?v=33_jDm1xdbc)
-
+> **⚠️ Python 3.11 required.** The Wiretap SDK and OpenColorIO binaries distributed with Flame are compiled against Python 3.11. Using Python 3.12+ will cause both to fail silently at startup. If you're using a conda environment, make sure to create it with `conda create -n comfyui python=3.11`.
 ---
 
 ## Nodes
