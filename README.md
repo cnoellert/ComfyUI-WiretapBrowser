@@ -22,7 +22,7 @@ Click **"Browse Flame"** to open the modal dialog, navigate to a clip, and selec
 In **destination mode** (used by the Writer), you can browse to a reel and create new libraries or reels directly from the browser UI.
 
 ### 🔥 Flame Clip Loader
-Reads frame data from a selected clip and converts the raw Wiretap RGB buffers into ComfyUI `IMAGE` tensors (`BHWC float32`). Supports all Flame bit depths:
+Reads frame data from a selected clip and converts the raw Wiretap RGB buffers into ComfyUI `IMAGE` tensors (`BHWC float32`). Includes a built-in **Browse Source** button — no separate Browser node needed. Clip selection auto-populates frame count, start frame, hostname, and server type. Supports all Flame bit depths:
 
 | Bit Depth | Format | Bytes/Pixel |
 |-----------|--------|-------------|
@@ -34,11 +34,11 @@ Reads frame data from a selected clip and converts the raw Wiretap RGB buffers i
 Also outputs `fps`, `colour_space`, and `clip_info` for downstream nodes.
 
 ### 🔥 Flame Clip Writer
-Writes processed IMAGE tensors back to a Flame project as a new clip.
+Writes processed IMAGE tensors back to a Flame project as a new clip. Includes a built-in **Browse Destination** button to select the target reel or library directly — no separate Browser node needed. You can also create new libraries and reels from within the browse dialog.
 
 **Two modes:**
-- **Wiretap mode** — Wire a destination reel from the Browser. The writer creates a new clip in Flame via CLI tools (`wiretap_create_clip` + `wiretap_rw_frame`), with configurable bit depth, frame rate, and colour space.
-- **Disk-only mode** — When no destination is wired, saves frames as EXR files to a local directory.
+- **Wiretap mode** — Use **Browse Destination** to select a reel, or wire a destination from a Browser node. The writer creates a new clip in Flame via CLI tools (`wiretap_create_clip` + `wiretap_rw_frame`), with configurable bit depth, frame rate, and colour space.
+- **Disk-only mode** — When no destination is set, saves frames as EXR files to a local directory.
 
 **Writer inputs:**
 | Input | Type | Description |
@@ -178,28 +178,22 @@ Use the **🔥 Flame Server Info** node to verify SDK detection and connectivity
 ### Basic Workflow: Load → Process → Write Back
 
 ```
-[Browser] → [Clip Loader] → [OCIO Transform] → [Your AI Node] → [OCIO Transform] → [Clip Writer]
- hostname     start_frame     source → linear    upscale/denoise   linear → source     destination
- clip_id      frame_count     colour_space        model_name       colour_space         clip_name
+[Clip Loader] → [OCIO Transform] → [Your AI Node] → [OCIO Transform] → [Clip Writer]
+ Browse Source    source → linear    upscale/denoise   linear → source    Browse Destination
+ start_frame      colour_space        model_name       colour_space        clip_name
+ frame_count
 ```
 
-1. Add a **🔥 Flame Wiretap Browser** node, set hostname, click **"Browse Flame"**
-2. Navigate to a clip and select it
-3. Connect to a **🔥 Flame Clip Loader** — set start_frame and frame_count
-4. (Optional) Add **🔥 Flame OCIO Transform** to convert colour space
-5. Process through your AI nodes (upscale, denoise, style transfer, etc.)
-6. (Optional) Add another OCIO Transform to convert back
-7. Connect to a **🔥 Flame Clip Writer** with a destination reel from a second Browser
+1. Add a **🔥 Flame Clip Loader** node, set hostname, click **"Browse Source"**
+2. Navigate to a clip and select it — frame count and start frame auto-populate
+3. (Optional) Add **🔥 Flame OCIO Transform** to convert colour space
+4. Process through your AI nodes (upscale, denoise, style transfer, etc.)
+5. (Optional) Add another OCIO Transform to convert back
+6. Add a **🔥 Flame Clip Writer**, click **"Browse Destination"** to select a reel
+7. Set **bit_depth** (16-bit half-float recommended), **clip_name**, and **fps**
+8. Wire `colour_space` from the OCIO Transform or Loader to embed it in the clip
 
-### Write-Back Workflow
-
-To write results back into Flame:
-
-1. Add a second **🔥 Flame Wiretap Browser** node
-2. Browse to the destination **reel** (or create a new library/reel from the browser)
-3. Wire the Browser's outputs to the Writer's destination inputs
-4. Set **bit_depth** (16-bit half-float recommended), **clip_name**, and **fps**
-5. Wire `colour_space` from the OCIO Transform or Loader to embed it in the clip
+> **Tip:** The standalone **🔥 Flame Wiretap Browser** node is still available if you prefer to wire clip/destination IDs between nodes explicitly, but the Loader and Writer browse buttons are the simplest workflow.
 
 ---
 

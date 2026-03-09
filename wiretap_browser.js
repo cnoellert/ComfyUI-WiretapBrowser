@@ -216,9 +216,13 @@ const MODAL_STYLES = `
 .wiretap-info-panel {
     padding: 8px 16px; border-top: 1px solid #333;
     font-size: 12px; color: #aaa;
+    min-height: 40px; box-sizing: border-box;
 }
 .wiretap-info-panel.clip-info {
     display: flex; flex-wrap: wrap; gap: 16px;
+}
+.wiretap-info-panel.wt-empty {
+    visibility: hidden;
 }
 .wiretap-info-panel .info-item { display: flex; gap: 4px; }
 .wiretap-info-panel .info-label { color: #5dade2; }
@@ -378,7 +382,7 @@ class WiretapBrowserDialog {
             </div>
             <div class="wiretap-create-bar" id="wt-create-bar" style="display:none"></div>
             <div class="wiretap-tree" id="wt-tree"></div>
-            <div class="wiretap-info-panel" id="wt-info" style="display:none"></div>
+            <div class="wiretap-info-panel wt-empty" id="wt-info"></div>
             <div class="wiretap-footer">
                 <div class="footer-left" id="wt-footer-hint">${cfg.emptyHint}</div>
                 <div class="footer-right">
@@ -441,7 +445,10 @@ class WiretapBrowserDialog {
         const btn = this.overlay.querySelector("#wt-select");
         if (btn) btn.disabled = true;
         const info = this.overlay.querySelector("#wt-info");
-        if (info) info.style.display = "none";
+        if (info) {
+            info.innerHTML = "";
+            info.className = "wiretap-info-panel wt-empty";
+        }
         const hint = this.overlay.querySelector("#wt-footer-hint");
         if (hint) hint.textContent = this.config.emptyHint;
     }
@@ -648,15 +655,24 @@ class WiretapBrowserDialog {
                 `;
 
                 // ── Click behavior ───────────────────────────────────────
+                // Defer layout-changing updates on single click so that a
+                // double-click registers on the same row before any reflow.
+                let _clickTimer = null;
+
                 row.addEventListener("click", () => {
                     if (selectable) {
-                        // Select this node
+                        // Immediate: highlight the row (no reflow)
                         this.overlay.querySelectorAll(".wiretap-node.selected")
                             .forEach((n) => n.classList.remove("selected"));
                         row.classList.add("selected");
                         this.selectedNode = child;
                         this.overlay.querySelector("#wt-select").disabled = false;
-                        this._showInfo(child);
+
+                        // Deferred: update info panel / header (causes reflow)
+                        clearTimeout(_clickTimer);
+                        _clickTimer = setTimeout(() => {
+                            this._showInfo(child);
+                        }, 300);
                     } else if (canBrowse) {
                         this._browseInto(child);
                     }
@@ -664,6 +680,9 @@ class WiretapBrowserDialog {
 
                 // ── Double-click behavior ────────────────────────────────
                 row.addEventListener("dblclick", () => {
+                    // Cancel the deferred layout update from single click
+                    clearTimeout(_clickTimer);
+
                     if (selectable && this.mode === "destination" && canBrowse) {
                         // In destination mode, double-click on a selectable
                         // container browses into it (single click selects)
@@ -702,7 +721,6 @@ class WiretapBrowserDialog {
 
         if (this.mode === "source" && child.is_clip) {
             panel.className = "wiretap-info-panel clip-info";
-            panel.style.display = "flex";
             panel.innerHTML = `
                 <div class="info-item"><span class="info-label">Resolution:</span> ${child.width}×${child.height}</div>
                 <div class="info-item"><span class="info-label">Frames:</span> ${child.num_frames}</div>
@@ -714,7 +732,6 @@ class WiretapBrowserDialog {
 
         } else if (this.mode === "destination") {
             panel.className = "wiretap-info-panel";
-            panel.style.display = "block";
             panel.innerHTML = `
                 <strong style="color: #2ecc71;">Write destination:</strong>
                 ${child.display_name} (${child.node_type})
@@ -723,7 +740,8 @@ class WiretapBrowserDialog {
             hint.textContent = `Clips will be created in: ${child.display_name}`;
 
         } else {
-            panel.style.display = "none";
+            panel.className = "wiretap-info-panel wt-empty";
+            panel.innerHTML = "";
             hint.textContent = `Selected: ${child.display_name}`;
         }
     }
