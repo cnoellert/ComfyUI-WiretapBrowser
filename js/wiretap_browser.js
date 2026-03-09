@@ -66,13 +66,14 @@ const BROWSER_MODES = {
         isSelectable: (child) => {
             const t = child.node_type;
             return t === "REEL" || t === "CLIP" || t === "LIBRARY"
-                || t === "LIBRARY_LIST" || t === "REEL_GROUP" || t === "FOLDER";
+                || t === "LIBRARY_LIST" || t === "REEL_GROUP" || t === "FOLDER"
+                || t === "DIR";
         },
         // Node types that are valid write destinations (for "Select Current" button)
         isWriteTarget: (nodeType) => {
             return nodeType === "REEL" || nodeType === "LIBRARY"
                 || nodeType === "LIBRARY_LIST" || nodeType === "REEL_GROUP"
-                || nodeType === "FOLDER";
+                || nodeType === "FOLDER" || nodeType === "DIR";
         },
         showClipInfo: false,
     },
@@ -262,19 +263,37 @@ class WiretapBrowserDialog {
      * @param {string}   mode        "source" or "destination"
      * @param {function} onSelect    callback(selectedNode)
      */
-    constructor(hostname, serverType, mode, onSelect) {
+    constructor(hostname, serverType, mode, onSelect, savedState = null) {
         this.hostname = hostname;
         this.serverType = serverType;
         this.mode = mode;
         this.config = BROWSER_MODES[mode] || BROWSER_MODES.source;
         this.onSelect = onSelect;
-        this.currentPath = "/";
-        this.pathHistory = [{ path: "/", name: "Root" }];
+        this._saveStateCallback = null;
+
+        // Restore saved state or start at root
+        if (savedState) {
+            this.currentPath = savedState.currentPath || "/";
+            this.pathHistory = savedState.pathHistory || [{ path: "/", name: "Root" }];
+            this._currentContainer = savedState.currentContainer || null;
+        } else {
+            this.currentPath = "/";
+            this.pathHistory = [{ path: "/", name: "Root" }];
+            this._currentContainer = null;
+        }
+
         this.selectedNode = null;
-        this._currentContainer = null;
         this.isMockMode = false;
         this.overlay = null;
         this._keyHandler = null;
+    }
+
+    _getState() {
+        return {
+            currentPath: this.currentPath,
+            pathHistory: [...this.pathHistory],
+            currentContainer: this._currentContainer,
+        };
     }
 
     async open() {
@@ -295,10 +314,13 @@ class WiretapBrowserDialog {
 
         this._buildModal();
         document.body.appendChild(this.overlay);
-        this._loadChildren("/");
+        this._loadChildren(this.currentPath);
     }
 
     close() {
+        if (this._saveStateCallback) {
+            this._saveStateCallback(this._getState());
+        }
         if (this._keyHandler) {
             document.removeEventListener("keydown", this._keyHandler);
             this._keyHandler = null;
@@ -463,14 +485,14 @@ class WiretapBrowserDialog {
             "VOLUME": { type: "PROJECT", label: "Project" },
             "LIBRARY_LIST": { type: "LIBRARY", label: "Library" },
             "LIBRARY": { type: "REEL", label: "Reel" },
+            "DIR": { type: "DIR", label: "Folder" },
         };
         return map[containerType] || null;
     }
 
     _updateCreateBar() {
         const bar = this.overlay.querySelector("#wt-create-bar");
-        if (!bar || this.mode !== "destination") {
-            if (bar) bar.style.display = "none";
+        if (!bar) {
             return;
         }
 
@@ -726,13 +748,24 @@ app.registerExtension({
                     const serverType = this.widgets.find(w => w.name === "server_type")?.value || "IFFFS";
                     const clipIdWidget = this.widgets.find(w => w.name === "clip_node_id");
 
+                    // Invalidate saved state if connection params changed
+                    if (this._wiretapBrowserState
+                        && (this._wiretapBrowserState._hostname !== hostname
+                            || this._wiretapBrowserState._serverType !== serverType)) {
+                        this._wiretapBrowserState = null;
+                    }
+
                     const dialog = new WiretapBrowserDialog(
                         hostname, serverType, "source",
                         (clip) => {
                             if (clipIdWidget) clipIdWidget.value = clip.node_id;
                             app.graph.setDirtyCanvas(true);
-                        }
+                        },
+                        this._wiretapBrowserState
                     );
+                    dialog._saveStateCallback = (state) => {
+                        this._wiretapBrowserState = { ...state, _hostname: hostname, _serverType: serverType };
+                    };
                     dialog.open();
                 }).serialize = false;
             };
@@ -740,6 +773,65 @@ app.registerExtension({
             const origDraw = nodeType.prototype.onDrawForeground;
             nodeType.prototype.onDrawForeground = function (ctx) {
                 if (origDraw) origDraw.apply(this, arguments);
+                const w = this.widgets?.find(w => w.name === "clip_node_id");
+                if (w?.value) {
+                    ctx.fillStyle = "#ff6b35";
+                    ctx.beginPath();
+                    ctx.arc(this.size[0] - 14, 14, 5, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            };
+        }
+
+        // ── Source Browser: WiretapClipLoader ─────────────────────────────
+        if (nodeData.name === "WiretapClipLoader") {
+            const origLoader = nodeType.prototype.onNodeCreated;
+            nodeType.prototype.onNodeCreated = function () {
+                if (origLoader) origLoader.apply(this, arguments);
+
+                this.addWidget("button", "🔥 Browse Source", null, () => {
+                    const hostnameWidget = this.widgets.find(w => w.name === "hostname");
+                    const serverTypeWidget = this.widgets.find(w => w.name === "server_type");
+                    const clipIdWidget = this.widgets.find(w => w.name === "clip_node_id");
+
+                    const hostname = hostnameWidget?.value || "localhost";
+                    const serverType = serverTypeWidget?.value || "IFFFS";
+
+                    // Invalidate saved state if connection params changed
+                    if (this._wiretapBrowserState
+                        && (this._wiretapBrowserState._hostname !== hostname
+                            || this._wiretapBrowserState._serverType !== serverType)) {
+                        this._wiretapBrowserState = null;
+                    }
+
+                    const frameCountWidget = this.widgets.find(w => w.name === "frame_count");
+                    const startFrameWidget = this.widgets.find(w => w.name === "start_frame");
+
+                    const dialog = new WiretapBrowserDialog(
+                        hostname, serverType, "source",
+                        (clip) => {
+                            if (clipIdWidget) clipIdWidget.value = clip.node_id;
+                            if (hostnameWidget) hostnameWidget.value = hostname;
+                            if (serverTypeWidget) serverTypeWidget.value = serverType;
+                            // Reset start frame and populate frame count from clip metadata
+                            if (startFrameWidget) startFrameWidget.value = 0;
+                            if (frameCountWidget && clip.num_frames) {
+                                frameCountWidget.value = clip.num_frames;
+                            }
+                            app.graph.setDirtyCanvas(true);
+                        },
+                        this._wiretapBrowserState
+                    );
+                    dialog._saveStateCallback = (state) => {
+                        this._wiretapBrowserState = { ...state, _hostname: hostname, _serverType: serverType };
+                    };
+                    dialog.open();
+                }).serialize = false;
+            };
+
+            const origLoaderDraw = nodeType.prototype.onDrawForeground;
+            nodeType.prototype.onDrawForeground = function (ctx) {
+                if (origLoaderDraw) origLoaderDraw.apply(this, arguments);
                 const w = this.widgets?.find(w => w.name === "clip_node_id");
                 if (w?.value) {
                     ctx.fillStyle = "#ff6b35";
@@ -761,13 +853,24 @@ app.registerExtension({
                     const serverType = this.widgets.find(w => w.name === "server_type")?.value || "IFFFS";
                     const destWidget = this.widgets.find(w => w.name === "destination_node_id");
 
+                    // Invalidate saved state if connection params changed
+                    if (this._wiretapBrowserState
+                        && (this._wiretapBrowserState._hostname !== hostname
+                            || this._wiretapBrowserState._serverType !== serverType)) {
+                        this._wiretapBrowserState = null;
+                    }
+
                     const dialog = new WiretapBrowserDialog(
                         hostname, serverType, "destination",
                         (node) => {
                             if (destWidget) destWidget.value = node.node_id;
                             app.graph.setDirtyCanvas(true);
-                        }
+                        },
+                        this._wiretapBrowserState
                     );
+                    dialog._saveStateCallback = (state) => {
+                        this._wiretapBrowserState = { ...state, _hostname: hostname, _serverType: serverType };
+                    };
                     dialog.open();
                 }).serialize = false;
             };
